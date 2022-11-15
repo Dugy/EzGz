@@ -156,7 +156,8 @@ class ByteInput {
 	int refillSome() {
 		if (position > std::ssize(buffer) / 2) {
 			filled -= position;
-			memmove(buffer.data(), &buffer[position], filled);
+            if(filled != 0)
+				memmove(buffer.data(), &buffer[position], filled);
 			position = 0;
 		}
 		int added = readMore(std::span<uint8_t>(buffer.begin() + filled, buffer.end()));
@@ -865,7 +866,8 @@ template <DecompressionSettings Settings = DefaultDecompressionSettings>
 std::vector<char> readDeflateIntoVector(std::span<const uint8_t> allData) {
 	return readDeflateIntoVector<Settings>([allData, position = 0] (std::span<uint8_t> toFill) mutable -> int {
 		int filling = std::min(allData.size() - position, toFill.size());
-		memcpy(toFill.data(), &allData[position], filling);
+		if(filling != 0)
+			memcpy(toFill.data(), &allData[position], filling);
 		position += filling;
 		return filling;
 	});
