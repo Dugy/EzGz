@@ -517,7 +517,7 @@ public:
 			}
 		}
 
-		for (int& it : codesIndex) it = UNUSED;
+		std::memset(codesIndex.data(), UNUSED, codesIndex.size());
 
 		struct UnindexedEntry {
 			int quantity = 0;
