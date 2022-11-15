@@ -156,7 +156,7 @@ class ByteInput {
 	int refillSome() {
 		if (position > std::ssize(buffer) / 2) {
 			filled -= position;
-            if(filled != 0)
+			if(filled != 0)
 				memmove(buffer.data(), &buffer[position], filled);
 			position = 0;
 		}
