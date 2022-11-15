@@ -1,5 +1,6 @@
 //usr/bin/g++ --std=c++20 -Wall $0 -g -o ${o=`mktemp`} && exec $o $*
 #include <iostream>
+#include <string>
 #include "ezgz.hpp"
 
 template <int Size>
