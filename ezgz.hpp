@@ -101,7 +101,7 @@ public:
 			Detail::CrcLookupTable<8>::data, Detail::CrcLookupTable<9>::data, Detail::CrcLookupTable<10>::data, Detail::CrcLookupTable<11>::data,
 			Detail::CrcLookupTable<12>::data, Detail::CrcLookupTable<13>::data, Detail::CrcLookupTable<14>::data, Detail::CrcLookupTable<15>::data};
 
-		ssize_t position = 0;
+		ptrdiff_t position = 0;
 		for ( ; position + chunkSize < std::ssize(input); position += chunkSize) {
 			union {
 				std::array<uint8_t, sizeof(state)> bytes;
@@ -181,7 +181,7 @@ public:
 		if (position + size >= filled) {
 			refillSome();
 		}
-		ssize_t start = position;
+		ptrdiff_t start = position;
 		int available = std::min<int>(size, filled - start);
 		position += available;
 		return {buffer.begin() + start, buffer.begin() + start + available};
@@ -1086,7 +1086,7 @@ template <DecompressionSettings Settings = DefaultDecompressionSettings>
 class IGzStreamBuffer : public std::streambuf {
 	IGzFile<Settings> inputFile;
 	int bytesToKeep = 10;
-	ssize_t produced = 0;
+	ptrdiff_t produced = 0;
 public:
 	template<typename Arg>
 	IGzStreamBuffer(const Arg& arg, int bytesToKeep) : inputFile(arg), bytesToKeep(bytesToKeep) {}
@@ -1096,7 +1096,7 @@ public:
 		if (batch.has_value()) {
 			// We have to believe std::istream that it won't edit the data, otherwise it would be necessary to copy the data
 			char* start = const_cast<char*>(batch->data());
-			setg(start - std::min<ssize_t>(bytesToKeep, produced), start, start + batch->size());
+			setg(start - std::min<ptrdiff_t>(bytesToKeep, produced), start, start + batch->size());
 			produced += batch->size();
 			return traits_type::to_int_type(*gptr());
 		} else {
