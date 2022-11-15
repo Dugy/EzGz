@@ -101,7 +101,7 @@ public:
 			Detail::CrcLookupTable<8>::data, Detail::CrcLookupTable<9>::data, Detail::CrcLookupTable<10>::data, Detail::CrcLookupTable<11>::data,
 			Detail::CrcLookupTable<12>::data, Detail::CrcLookupTable<13>::data, Detail::CrcLookupTable<14>::data, Detail::CrcLookupTable<15>::data};
 
-		ssize_t position = 0;
+		ptrdiff_t position = 0;
 		for ( ; position + chunkSize < std::ssize(input); position += chunkSize) {
 			union {
 				std::array<uint8_t, sizeof(state)> bytes;
@@ -156,7 +156,8 @@ class ByteInput {
 	int refillSome() {
 		if (position > std::ssize(buffer) / 2) {
 			filled -= position;
-			memmove(buffer.data(), &buffer[position], filled);
+			if(filled != 0)
+				memmove(buffer.data(), &buffer[position], filled);
 			position = 0;
 		}
 		int added = readMore(std::span<uint8_t>(buffer.begin() + filled, buffer.end()));
@@ -181,7 +182,7 @@ public:
 		if (position + size >= filled) {
 			refillSome();
 		}
-		ssize_t start = position;
+		ptrdiff_t start = position;
 		int available = std::min<int>(size, filled - start);
 		position += available;
 		return {buffer.begin() + start, buffer.begin() + start + available};
@@ -412,7 +413,7 @@ public:
 		if (removing < 0) [[unlikely]] {
 			throw std::logic_error("consume() cannot keep more bytes than it provided before");
 		}
-		memmove(buffer.begin(), buffer.begin() + removing, used - removing);
+		memmove(buffer.data(), buffer.data() + removing, used - removing);
 		used -= removing;
 		consumed = used; // Make everything in the buffer available (except the data returned earlier)
 
@@ -516,7 +517,7 @@ public:
 			}
 		}
 
-		for (int& it : codesIndex) it = UNUSED;
+		std::memset(codesIndex.data(), UNUSED, codesIndex.size());
 
 		struct UnindexedEntry {
 			int quantity = 0;
@@ -865,7 +866,8 @@ template <DecompressionSettings Settings = DefaultDecompressionSettings>
 std::vector<char> readDeflateIntoVector(std::span<const uint8_t> allData) {
 	return readDeflateIntoVector<Settings>([allData, position = 0] (std::span<uint8_t> toFill) mutable -> int {
 		int filling = std::min(allData.size() - position, toFill.size());
-		memcpy(toFill.data(), &allData[position], filling);
+		if(filling != 0)
+			memcpy(toFill.data(), &allData[position], filling);
 		position += filling;
 		return filling;
 	});
@@ -1086,7 +1088,7 @@ template <DecompressionSettings Settings = DefaultDecompressionSettings>
 class IGzStreamBuffer : public std::streambuf {
 	IGzFile<Settings> inputFile;
 	int bytesToKeep = 10;
-	ssize_t produced = 0;
+	ptrdiff_t produced = 0;
 public:
 	template<typename Arg>
 	IGzStreamBuffer(const Arg& arg, int bytesToKeep) : inputFile(arg), bytesToKeep(bytesToKeep) {}
@@ -1096,7 +1098,7 @@ public:
 		if (batch.has_value()) {
 			// We have to believe std::istream that it won't edit the data, otherwise it would be necessary to copy the data
 			char* start = const_cast<char*>(batch->data());
-			setg(start - std::min<ssize_t>(bytesToKeep, produced), start, start + batch->size());
+			setg(start - std::min<ptrdiff_t>(bytesToKeep, produced), start, start + batch->size());
 			produced += batch->size();
 			return traits_type::to_int_type(*gptr());
 		} else {

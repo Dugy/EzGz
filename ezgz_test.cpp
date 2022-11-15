@@ -1,5 +1,6 @@
 //usr/bin/g++ --std=c++20 -Wall $0 -g -o ${o=`mktemp`} && exec $o $*
 #include <iostream>
+#include <string>
 #include "ezgz.hpp"
 
 template <int Size>
@@ -19,7 +20,8 @@ struct InputHelper : EzGz::Detail::ByteInput<SettingsWithInputSize<Size>> {
 	: EzGz::Detail::ByteInput<SettingsWithInputSize<Size>>([source, position = 0] (std::span<uint8_t> toFill) mutable -> int {
 		int filling = std::min(source.size() - position, toFill.size());
 //		std::cout << "Providing " << filling << " bytes of data, " << (source.size() - position - filling) << " left" << std::endl;
-		memcpy(toFill.data(), &source[position], filling);
+		if(filling != 0)
+			memcpy(toFill.data(), &source[position], filling);
 		position += filling;
 		return filling;
 	}) {}
