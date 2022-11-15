@@ -412,7 +412,7 @@ public:
 		if (removing < 0) [[unlikely]] {
 			throw std::logic_error("consume() cannot keep more bytes than it provided before");
 		}
-		memmove(buffer.begin(), buffer.begin() + removing, used - removing);
+		memmove(buffer.data(), buffer.data() + removing, used - removing);
 		used -= removing;
 		consumed = used; // Make everything in the buffer available (except the data returned earlier)
 
