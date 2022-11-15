@@ -156,8 +156,7 @@ class ByteInput {
 	int refillSome() {
 		if (position > std::ssize(buffer) / 2) {
 			filled -= position;
-			if(filled != 0)
-				memmove(buffer.data(), &buffer[position], filled);
+			memmove(buffer.data(), buffer.data() + position, filled);
 			position = 0;
 		}
 		int added = readMore(std::span<uint8_t>(buffer.begin() + filled, buffer.end()));
