@@ -5,7 +5,6 @@
 #include <array>
 #include <cstring>
 #include <span>
-#include <fstream>
 #include <charconv>
 #include <vector>
 #include <numeric>
@@ -13,6 +12,9 @@
 #include <functional>
 #include <variant>
 #include <memory>
+#ifndef EZGZ_NO_FILE
+#include <fstream>
+#endif
 
 namespace EzGz {
 
@@ -26,6 +28,12 @@ concept DecompressionSettings = std::constructible_from<typename T::Checksum> &&
 	bool(T::verifyChecksum);
 };
 
+template <typename T>
+concept BasicStringType = std::constructible_from<T> && requires(T value) {
+	value += 'a';
+	std::string_view(value);
+};
+
 struct NoChecksum { // Noop
 	int operator() () { return 0; }
 	int operator() (std::span<const uint8_t>) { return 0; }
@@ -37,6 +45,7 @@ struct MinDecompressionSettings {
 	constexpr static int inputBufferSize = 33000;
 	using Checksum = NoChecksum;
 	constexpr static bool verifyChecksum = false;
+	using StringType = std::string;
 };
 
 namespace Detail {
@@ -886,6 +895,7 @@ protected:
 public:
 	IDeflateArchive(std::function<int(std::span<uint8_t> batch)> readMoreFunction) : input(readMoreFunction) {}
 
+#ifndef EZGZ_NO_FILE
 	IDeflateArchive(const std::string& fileName) : input([file = std::make_shared<std::ifstream>(fileName, std::ios::binary)] (std::span<uint8_t> batch) mutable {
 		if (!file->good()) {
 			throw std::runtime_error("Can't read file");
@@ -897,6 +907,7 @@ public:
 		}
 		return bytesRead;
 	}) {}
+#endif
 
 	IDeflateArchive(std::span<const uint8_t> data) : input([data] (std::span<uint8_t> batch) mutable {
 		int copying = std::min(batch.size(), data.size());
@@ -971,14 +982,15 @@ enum class CreatingOperatingSystem {
 };
 
 // File information in the .gz file
+template <BasicStringType StringType>
 struct IGzFileInfo {
 	int32_t modificationTime = 0;
 	CreatingOperatingSystem operatingSystem = CreatingOperatingSystem::OTHER;
 	bool fastestCompression = false;
 	bool densestCompression = false;
 	std::optional<std::vector<uint8_t>> extraData = {};
-	std::string name;
-	std::string comment;
+	StringType name;
+	StringType comment;
 	bool probablyText = false;
 
 	template <DecompressionSettings Settings>
@@ -1039,7 +1051,7 @@ struct IGzFileInfo {
 			char letter = input.template getInteger<uint8_t>();
 			check(letter);
 			while (letter != '\0') {
-				name += letter;
+				comment += letter;
 				letter = input.template getInteger<uint8_t>();
 				check(letter);
 			}
@@ -1060,7 +1072,7 @@ struct IGzFileInfo {
 // Parses a .gz file, only takes care of the header, the rest is handled by its parent class IDeflateArchive
 template <DecompressionSettings Settings = DefaultDecompressionSettings>
 class IGzFile : public IDeflateArchive<Settings> {
-	IGzFileInfo parsedHeader;
+	IGzFileInfo<typename Settings::StringType> parsedHeader;
 	using Deflate = IDeflateArchive<Settings>;
 
 	void onFinish() override {
@@ -1077,7 +1089,7 @@ public:
 	IGzFile(const std::string& fileName) : Deflate(fileName), parsedHeader(Deflate::input) {}
 	IGzFile(std::span<const uint8_t> data) : Deflate(data), parsedHeader(Deflate::input) {}
 
-	const IGzFileInfo& info() const {
+	const IGzFileInfo<typename Settings::StringType>& info() const {
 		return parsedHeader;
 	}
 };
@@ -1105,7 +1117,7 @@ public:
 		}
 	}
 
-	const IGzFileInfo& info() const {
+	const IGzFileInfo<typename Settings::StringType>& info() const {
 		return inputFile.info();
 	}
 };
@@ -1116,8 +1128,10 @@ template <DecompressionSettings Settings = DefaultDecompressionSettings>
 class BasicIGzStream : private Detail::IGzStreamBuffer<Settings>, public std::istream
 {
 public:
+#ifndef EZGZ_NO_FILE
 	// Open and read a file, always keeping the given number of characters specified in the second character (10 by default)
 	BasicIGzStream(const std::string& sourceFile, int bytesToKeep = 10) : Detail::IGzStreamBuffer<Settings>(sourceFile, bytesToKeep), std::istream(this) {}
+#endif
 	// Read from a buffer
 	BasicIGzStream(std::span<const uint8_t> data, int bytesToKeep = 10) : Detail::IGzStreamBuffer<Settings>(data, bytesToKeep),  std::istream(this) {}
 	// Use a function that fills a buffer of data and returns how many bytes it wrote

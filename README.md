@@ -58,6 +58,7 @@ Most classes and free functions accept a template argument whose values allow tu
   * `NoChecksum` - does nothing, can save some time if checksum isn't checked or isn't known
   * `LightCrc32` - uses a 1 kiB table (precomputed at compile time), slow on modern CPUs
   * `FastCrc32` - uses a 16 kiB table (precomputed at compile time), works well with out of order execution
+* StringType - type of string to save file name and comment into (must be default constructible, convertible to `std::string_view` and support the `+=` operator for `char`), `std::string` by default
 
 You can either declare your own struct or inherit from a default one and adjust only what you want:
 ```C++
@@ -68,6 +69,8 @@ struct Settings : Ezgz::DefaultDecompressionSettings {
 }; // This will skip checksum
 std::vector<char> decompressed = Ezgz::IGzFile<Settings>("data.gz").readAll();
 ```
+
+If including `fstream` is undesirable, the `EZGZ_NO_FILE` macro can be defined to remove the constructors that accept file names. This does not restrict usability much.
 
 ## Performance
 Decompression speeds over 250 MiB/s are possible on modern CPUs, making it about 10% faster than `zlib`. It was tested on the standard Silesia Corpus file, compressed for minimum size.
@@ -81,4 +84,4 @@ The type used to represent bytes of compressed data is `uint8_t`. The type to re
 
 Errors are handled with exceptions. Unless there is a bug, an error happens only if the input file is incorrect. All exceptions inherit from `std::exception`, parsing errors are `std::runtime_error`, internal errors with `std::logic_error` (these should not appear unless there is a bug). In absence of RTTI, catching an exception almost certainly means the file is corrupted (if compiling with exceptions disabled, exceptions have to be enabled for the file that includes this header, performance would be worse without them). Exceptions thrown during decompression mean the entire output may be invalid (checksum failures are detected only at the end of file). If an exception is thrown inside a function that fills an input buffer, it will be propagated.
 
-The decompression algorithm itself does not use dynamic allocation. All buffers and indexes are on stack. Exceptions, string values obtained from the files (like names) and callbacks done using `std::function` may dynamically allocate.
+The decompression algorithm itself does not use dynamic allocation. All buffers and indexes are on stack. Exceptions, `std::string` values obtained from the files (like names) and callbacks done using `std::function` may dynamically allocate. The string type can be configured using a custom class as settings template argument.
