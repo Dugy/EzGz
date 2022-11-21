@@ -57,7 +57,7 @@ int main(int, char**) {
 		InputHelper<1> byteReader(data);
 		{
 			BitReader reader(&byteReader);
-			auto readTwoBits = reader.getBits(2);
+			auto readTwoBits = reader.getBitsBackwardOrder(2);
 			doATest(readTwoBits.value(), 0b01u);
 			readTwoBits.getMore(6);
 			readTwoBits.getMore(8);
@@ -71,10 +71,10 @@ int main(int, char**) {
 
 		{
 			BitReader reader(&byteReader);
-			auto readFourBits = reader.getBits(4);
+			auto readFourBits = reader.getBitsBackwardOrder(4);
 			doATest(readFourBits.value(), 0b0101u);
 			reader.peekAByteAndConsumeSome([&] (uint8_t byte) {
-				doATest(int(byte), 0b01010000);
+				doATest(int(byte), 0b00001010);
 				return 4;
 			});
 		}
@@ -112,7 +112,7 @@ int main(int, char**) {
 		InputHelper<5> byteReader(data);
 		BitReader reader(&byteReader);
 		{
-			auto readTwoBits = reader.getBits(2);
+			auto readTwoBits = reader.getBitsBackwardOrder(2);
 			doATest(readTwoBits.value(), 0b01u);
 			readTwoBits.getMore(4);
 			doATest(readTwoBits.value(), 0b010101u);
@@ -120,12 +120,12 @@ int main(int, char**) {
 		}
 
 		{
-			auto readSevenBits = reader.getBits(7);
+			auto readSevenBits = reader.getBitsBackwardOrder(7);
 			doATest(readSevenBits.value(), 0b0101010u);
 		}
 
 		{
-			auto readSomeBits = reader.getBits(2);
+			auto readSomeBits = reader.getBitsBackwardOrder(2);
 			readSomeBits.getMore(8);
 			doATest(readSomeBits.value(), 0b1010101010u);
 			readSomeBits.getMore(8);
@@ -139,12 +139,12 @@ int main(int, char**) {
 		constexpr static std::array<uint8_t, 5> data = { 0b10011001, 0b10011001, 0b11110000, 0b11110000, 0b10000001 };
 		InputHelper<32> byteReader(data);
 		BitReader reader(&byteReader);
-		doATest(reader.getBitsForwardOrder(2), 0b01u);
-		doATest(reader.getBitsForwardOrder(7), 0b1100110u);
-		doATest(reader.getBitsForwardOrder(13), 0b1100001001100u);
+		doATest(reader.getBits(2), 0b01u);
+		doATest(reader.getBits(7), 0b1100110u);
+		doATest(reader.getBits(13), 0b1100001001100u);
 
 		{
-			auto readSomeBits = reader.getBits(8);
+			auto readSomeBits = reader.getBitsBackwardOrder(8);
 			readSomeBits.getMore(2);
 			doATest(readSomeBits.value(), 0b1100001111u);
 			readSomeBits.getMore(3);
@@ -158,7 +158,7 @@ int main(int, char**) {
 		InputHelper<32> byteReader(data);
 		{
 			BitReader reader(&byteReader);
-			doATest(reader.getBitsForwardOrder(3), 0b001u);
+			doATest(reader.getBits(3), 0b001u);
 		}
 		doATest(byteReader.getBytes(2), 0x2535u); // TODO: Rename to getInteger()
 		doATest(byteReader.getBytes(3), 0xc7b3a8u);
@@ -170,7 +170,7 @@ int main(int, char**) {
 		InputHelper<2> reader(data);
 		{
 			BitReader bitReader(&reader);
-			doATest(bitReader.getBitsForwardOrder(6), 0b100110u);
+			doATest(bitReader.getBits(6), 0b100110u);
 		}
 		std::span<const uint8_t> range1 = reader.getRange(2); // TODO: Rename to getByteRange()
 		doATest(range1[0], 'd');
@@ -196,19 +196,19 @@ int main(int, char**) {
 		byteReader.getBytes(8);
 
 		BitReader reader(&byteReader);
-		reader.getBits(7);
+		reader.getBitsBackwardOrder(7);
 
 		std::array<uint8_t, codeCodingReorder.size()> codeCodingLengths = {3, 4, 4, 3, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3};
-		std::array<uint8_t, 256> codeCodingLookup = {4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
-				4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
-				4, 4, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-				0, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 5, 5, 5,
-				5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 17, 17, 17, 17, 17, 17,
-				17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 18, 18,
-				18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18,
-				18, 18, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2};
+		std::array<uint8_t, 256> codeCodingLookup = {4, 5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2, 4, 5, 0, 18, 4, 17, 3, 1, 4,
+				5, 0, 18, 4, 17, 3, 2, 4, 5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2, 4, 5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4,
+				17, 3, 2, 4, 5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2, 4, 5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2, 4,
+				5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2, 4, 5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2, 4, 5, 0, 18, 4,
+				17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2, 4, 5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2, 4, 5, 0, 18, 4, 17, 3, 1, 4,
+				5, 0, 18, 4, 17, 3, 2, 4, 5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2, 4, 5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4,
+				17, 3, 2, 4, 5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2, 4, 5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2, 4,
+				5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2};
 		EncodedTable<288, decltype(reader)> table(reader, 260, codeCodingLookup, codeCodingLengths);
-		reader.getBits(29);
+		reader.getBitsBackwardOrder(29);
 
 		doATest(table.readWord(), 'R');
 		doATest(table.readWord(), 'R');
@@ -225,14 +225,14 @@ int main(int, char**) {
 		doATest(table.readWord(), 'H');
 		doATest(table.readWord(), 'G');
 		doATest(table.readWord(), 257);
-		reader.getBits(3);
+		reader.getBitsBackwardOrder(3);
 		doATest(table.readWord(), '!');
 		doATest(table.readWord(), ' ');
 		doATest(table.readWord(), 'R');
 		doATest(table.readWord(), 'A');
 		doATest(table.readWord(), 'A');
 		doATest(table.readWord(), 257);
-		reader.getBits(4);
+		reader.getBitsBackwardOrder(4);
 		doATest(table.readWord(), 'R');
 		doATest(table.readWord(), '!');
 	}
@@ -328,14 +328,14 @@ int main(int, char**) {
 		BitReader reader(&byteReader);
 
 		std::array<uint8_t, codeCodingReorder.size()> codeCodingLengths = {0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 0, 0, 3, 3};
-		std::array<uint8_t, 256> codeCodingLookup = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-				1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-				1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-				1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13,
-				13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 14, 14, 14, 14, 14, 14, 14, 14,
-				14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 17, 17, 17, 17, 17,
-				17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 18, 18,
-				18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18};
+		std::array<uint8_t, 256> codeCodingLookup = {1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1,
+				18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18,
+				1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1,
+				13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13,
+				1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17,
+				1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14,
+				1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18,
+				1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18};
 		EncodedTable<288, decltype(reader)> table(reader, 270, codeCodingLookup, codeCodingLengths);
 
 		doATest(table.readWord(), 'R');

@@ -1,6 +1,6 @@
 //usr/bin/g++ --std=c++20 -Wall $0 -g -o ${o=`mktemp`} && exec $o $*
-#include "ezgz.hpp"
 #include <iostream>
+#include "ezgz.hpp"
 #include <filesystem>
 #include <chrono>
 

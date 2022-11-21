@@ -1,7 +1,6 @@
 #ifndef EZGZ_HPP
 #define EZGZ_HPP
 
-#include <iostream>
 #include <array>
 #include <cstring>
 #include <span>
@@ -12,6 +11,7 @@
 #include <functional>
 #include <variant>
 #include <memory>
+#include <istream>
 #ifndef EZGZ_NO_FILE
 #include <fstream>
 #endif
@@ -154,6 +154,22 @@ namespace Detail {
 
 static constexpr std::array<uint8_t, 19> codeCodingReorder = {16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15};
 
+static constexpr std::array<uint8_t, 256> reversedBytes = {0x0, 0x80, 0x40, 0xc0, 0x20, 0xa0, 0x60, 0xe0, 0x10,
+		0x90, 0x50, 0xd0, 0x30, 0xb0, 0x70, 0xf0, 0x08, 0x88, 0x48, 0xc8, 0x28, 0xa8, 0x68, 0xe8, 0x18, 0x98, 0x58,
+		0xd8, 0x38, 0xb8, 0x78, 0xf8, 0x04, 0x84, 0x44, 0xc4, 0x24, 0xa4, 0x64, 0xe4, 0x14, 0x94, 0x54, 0xd4, 0x34,
+		0xb4, 0x74, 0xf4, 0x0c, 0x8c, 0x4c, 0xcc, 0x2c, 0xac, 0x6c, 0xec, 0x1c, 0x9c, 0x5c, 0xdc, 0x3c, 0xbc, 0x7c,
+		0xfc, 0x02, 0x82, 0x42, 0xc2, 0x22, 0xa2, 0x62, 0xe2, 0x12, 0x92, 0x52, 0xd2, 0x32, 0xb2, 0x72, 0xf2, 0x0a,
+		0x8a, 0x4a, 0xca, 0x2a, 0xaa, 0x6a, 0xea, 0x1a, 0x9a, 0x5a, 0xda, 0x3a, 0xba, 0x7a, 0xfa, 0x6, 0x86, 0x46,
+		0xc6, 0x26, 0xa6, 0x66, 0xe6, 0x16, 0x96, 0x56, 0xd6, 0x36, 0xb6, 0x76, 0xf6, 0x0e, 0x8e, 0x4e, 0xce, 0x2e,
+		0xae, 0x6e, 0xee, 0x1e, 0x9e, 0x5e, 0xde, 0x3e, 0xbe, 0x7e, 0xfe, 0x01, 0x81, 0x41, 0xc1, 0x21, 0xa1, 0x61,
+		0xe1, 0x11, 0x91, 0x51, 0xd1, 0x31, 0xb1, 0x71, 0xf1, 0x09, 0x89, 0x49, 0xc9, 0x29, 0xa9, 0x69, 0xe9, 0x19,
+		0x99, 0x59, 0xd9, 0x39, 0xb9, 0x79, 0xf9, 0x05, 0x85, 0x45, 0xc5, 0x25, 0xa5, 0x65, 0xe5, 0x15, 0x95, 0x55,
+		0xd5, 0x35, 0xb5, 0x75, 0xf5, 0x0d, 0x8d, 0x4d, 0xcd, 0x2d, 0xad, 0x6d, 0xed, 0x1d, 0x9d, 0x5d, 0xdd, 0x3d,
+		0xbd, 0x7d, 0xfd, 0x03, 0x83, 0x43, 0xc3, 0x23, 0xa3, 0x63, 0xe3, 0x13, 0x93, 0x53, 0xd3, 0x33, 0xb3, 0x73,
+		0xf3, 0x0b, 0x8b, 0x4b, 0xcb, 0x2b, 0xab, 0x6b, 0xeb, 0x1b, 0x9b, 0x5b, 0xdb, 0x3b, 0xbb, 0x7b, 0xfb, 0x07,
+		0x87, 0x47, 0xc7, 0x27, 0xa7, 0x67, 0xe7, 0x17, 0x97, 0x57, 0xd7, 0x37, 0xb7, 0x77, 0xf7, 0x0f, 0x8f, 0x4f,
+		0xcf, 0x2f, 0xaf, 0x6f, 0xef, 0x1f, 0x9f, 0x5f, 0xdf, 0x3f, 0xbf, 0x7f, 0xff};
+
 // Provides access to input stream as chunks of contiguous data
 template <DecompressionSettings Settings>
 class ByteInput {
@@ -161,7 +177,6 @@ class ByteInput {
 	std::function<int(std::span<uint8_t> batch)> readMore;
 	int position = 0;
 	int filled = 0;
-
 	int refillSome() {
 		if (position > std::ssize(buffer) / 2) {
 			filled -= position;
@@ -255,22 +270,6 @@ class BitReader {
 	static constexpr std::array<uint16_t, 17> upperRemovals = {0x0000, 0x0001, 0x0003, 0x0007, 0x000f, 0x001f, 0x003f, 0x007f, 0x00ff,
 			0x01ff, 0x03ff, 0x07ff, 0x0fff, 0x1fff, 0x3fff, 0x7fff, 0xffff};
 
-	static constexpr std::array<uint8_t, 256> reversedBytes = {0x0, 0x80, 0x40, 0xc0, 0x20, 0xa0, 0x60, 0xe0, 0x10,
-			0x90, 0x50, 0xd0, 0x30, 0xb0, 0x70, 0xf0, 0x08, 0x88, 0x48, 0xc8, 0x28, 0xa8, 0x68, 0xe8, 0x18, 0x98, 0x58,
-			0xd8, 0x38, 0xb8, 0x78, 0xf8, 0x04, 0x84, 0x44, 0xc4, 0x24, 0xa4, 0x64, 0xe4, 0x14, 0x94, 0x54, 0xd4, 0x34,
-			0xb4, 0x74, 0xf4, 0x0c, 0x8c, 0x4c, 0xcc, 0x2c, 0xac, 0x6c, 0xec, 0x1c, 0x9c, 0x5c, 0xdc, 0x3c, 0xbc, 0x7c,
-			0xfc, 0x02, 0x82, 0x42, 0xc2, 0x22, 0xa2, 0x62, 0xe2, 0x12, 0x92, 0x52, 0xd2, 0x32, 0xb2, 0x72, 0xf2, 0x0a,
-			0x8a, 0x4a, 0xca, 0x2a, 0xaa, 0x6a, 0xea, 0x1a, 0x9a, 0x5a, 0xda, 0x3a, 0xba, 0x7a, 0xfa, 0x6, 0x86, 0x46,
-			0xc6, 0x26, 0xa6, 0x66, 0xe6, 0x16, 0x96, 0x56, 0xd6, 0x36, 0xb6, 0x76, 0xf6, 0x0e, 0x8e, 0x4e, 0xce, 0x2e,
-			0xae, 0x6e, 0xee, 0x1e, 0x9e, 0x5e, 0xde, 0x3e, 0xbe, 0x7e, 0xfe, 0x01, 0x81, 0x41, 0xc1, 0x21, 0xa1, 0x61,
-			0xe1, 0x11, 0x91, 0x51, 0xd1, 0x31, 0xb1, 0x71, 0xf1, 0x09, 0x89, 0x49, 0xc9, 0x29, 0xa9, 0x69, 0xe9, 0x19,
-			0x99, 0x59, 0xd9, 0x39, 0xb9, 0x79, 0xf9, 0x05, 0x85, 0x45, 0xc5, 0x25, 0xa5, 0x65, 0xe5, 0x15, 0x95, 0x55,
-			0xd5, 0x35, 0xb5, 0x75, 0xf5, 0x0d, 0x8d, 0x4d, 0xcd, 0x2d, 0xad, 0x6d, 0xed, 0x1d, 0x9d, 0x5d, 0xdd, 0x3d,
-			0xbd, 0x7d, 0xfd, 0x03, 0x83, 0x43, 0xc3, 0x23, 0xa3, 0x63, 0xe3, 0x13, 0x93, 0x53, 0xd3, 0x33, 0xb3, 0x73,
-			0xf3, 0x0b, 0x8b, 0x4b, 0xcb, 0x2b, 0xab, 0x6b, 0xeb, 0x1b, 0x9b, 0x5b, 0xdb, 0x3b, 0xbb, 0x7b, 0xfb, 0x07,
-			0x87, 0x47, 0xc7, 0x27, 0xa7, 0x67, 0xe7, 0x17, 0x97, 0x57, 0xd7, 0x37, 0xb7, 0x77, 0xf7, 0x0f, 0x8f, 0x4f,
-			0xcf, 0x2f, 0xaf, 0x6f, 0xef, 0x1f, 0x9f, 0x5f, 0xdf, 0x3f, 0xbf, 0x7f, 0xff};
-
 public:
 
 	BitReader(ByteInputType* byteInput) : input(byteInput) {}
@@ -301,7 +300,7 @@ public:
 		constexpr BitGroup(BitReader* parent, uint64_t data, int bits) : parent(parent), data(data), bits(bits) {}
 
 		void getMore(int amount) {
-			uint64_t added = parent->getBits(amount).data;
+			uint64_t added = parent->getBitsBackwardOrder(amount).data;
 			data <<= amount;
 			data |= added;
 			bits += amount;
@@ -325,7 +324,7 @@ public:
 	};
 
 	// Up to 8 bits, unwanted bits blanked
-	BitGroup getBits(int amount) {
+	BitGroup getBitsBackwardOrder(int amount) {
 		refillIfNeeded();
 		uint8_t result = reversedBytes[uint8_t(data)];
 		data >>= amount;
@@ -335,7 +334,7 @@ public:
 	}
 
 	// Up to 16 bits, unwanted bits blanked
-	uint16_t getBitsForwardOrder(int amount) {
+	uint16_t getBits(int amount) {
 		refillIfNeeded();
 		uint16_t result = data;
 		data >>= amount;
@@ -349,7 +348,7 @@ public:
 	void peekAByteAndConsumeSome(const ReadAndTellHowMuchToConsume& readAndTellHowMuchToConsume) {
 		refillIfNeeded();
 		uint8_t pulled = data;
-		auto consumed = readAndTellHowMuchToConsume(reversedBytes[pulled]);
+		auto consumed = readAndTellHowMuchToConsume(pulled);
 		data >>= consumed;
 		bitsLeft -= consumed;
 	}
@@ -360,7 +359,7 @@ public:
 			// Sizes in this range take several extra bits
 			int size = partOfSize;
 			int nextBits = (size - 7) >> 2;
-			auto additionalBits = getBitsForwardOrder(nextBits);
+			auto additionalBits = getBits(nextBits);
 			size++; // Will ease the next line
 			size = ((((size & 0x3) << nextBits) | additionalBits)) + ((1 << (size >> 2)) + 3); // This is a generalisation of the size table at 3.2.5
 			return size;
@@ -372,7 +371,7 @@ public:
 	// Uses the table in the specification to determine distance from where bytes are copied
 	int parseLongerDistance(int partOfDistance) {
 		int readMore = (partOfDistance - 3) >> 1;
-		auto moreBits = getBitsForwardOrder(readMore);
+		auto moreBits = getBits(readMore);
 		constexpr static std::array<int, 30> distanceOffsets = {1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33,
 				49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577};
 		int distance = distanceOffsets[partOfDistance - 1] + moreBits;
@@ -470,7 +469,8 @@ template <int MaxSize, typename ReaderType>
 class EncodedTable {
 	ReaderType& reader;
 	struct CodeEntry {
-		uint16_t code = 0;
+		uint8_t start = 0;
+		uint8_t ending = 0;
 		uint8_t length = 0; // 0 if unused
 	};
 	std::array<CodeEntry, MaxSize> codes = {};
@@ -504,7 +504,7 @@ public:
 			} else if (length == 16) {
 				if (i == 0) [[unlikely]]
 					throw std::runtime_error("Invalid lookback position");
-				int copy = reader.getBitsForwardOrder(2) + 3;
+				int copy = reader.getBits(2) + 3;
 				for (int j = i; j < i + copy; j++) {
 					codes[j].length = codes[i - 1].length;
 				}
@@ -513,9 +513,9 @@ public:
 			} else if (length > 16) {
 				int zeroCount = 0;
 				if (length == 17) {
-					zeroCount = reader.getBitsForwardOrder(3) + 3;
+					zeroCount = reader.getBits(3) + 3;
 				} else {
-					int sevenBitsValue = reader.getBitsForwardOrder(7);
+					int sevenBitsValue = reader.getBits(7);
 					zeroCount = sevenBitsValue + 11;
 				};
 				for (int j = i; j < i + zeroCount; j++) {
@@ -524,8 +524,6 @@ public:
 				i += zeroCount;
 			}
 		}
-
-		std::memset(codesIndex.data(), UNUSED, codesIndex.size());
 
 		struct UnindexedEntry {
 			int quantity = 0;
@@ -542,15 +540,19 @@ public:
 					if (codes[i].length == size) {
 						if (nextCode >= (1 << size)) [[unlikely]]
 								throw std::runtime_error("Bad Huffman encoding, run out of Huffman codes");
-						codes[i].code = nextCode;
+						uint8_t firstPart = uint8_t(nextCode);
 						if (size <= 8) [[likely]] {
-							for (int code = codes[i].code << (8 - size); code < (codes[i].code + 1) << (8 - size); code++) {
+							codes[i].start = reversedBytes[firstPart];
+							for (int code = codes[i].start >> (8 - size); code < std::ssize(codesIndex); code += (1 << size)) {
 								codesIndex[code] = i;
 							}
 						} else {
-							int startPart = nextCode >> (size - 8);
-							codesIndex[startPart] = UNINDEXED;
-							unindexedEntries[startPart].quantity++;
+							uint8_t start = reversedBytes[uint8_t(nextCode >> (size - 8))];
+//							std::cout << "Code for " << i << " is " << size << " bytes long, prefix " << int(start) << std::endl;
+							codes[i].start = start;
+							codesIndex[start] = UNINDEXED;
+							unindexedEntries[start].quantity++;
+							codes[i].ending = reversedBytes[uint8_t(nextCode)] >> (16 - size);
 						}
 						nextCode++;
 					}
@@ -565,17 +567,22 @@ public:
 			entry.startIndex = currentStartIndex;
 			currentStartIndex += entry.quantity;
 		}
+//		for (int i = 0; i < std::ssize(unindexedEntries); i++) {
+//			auto& entry = unindexedEntries[i];
+//			if (entry.quantity > 0)
+//				std::cout << "Unindexed " << i << ": quantity " << entry.quantity << ", startIndex " << entry.startIndex << std::endl;
+//		}
 
 		// Index the longer parts
 		for (int i = 0; i < std::ssize(codes); i++) {
 			CodeEntry& code = codes[i];
 			if (code.length > 8) {
-				int index = code.code >> (code.length - 8);
-				UnindexedEntry& unindexedEntry = unindexedEntries[index];
+				UnindexedEntry& unindexedEntry = unindexedEntries[code.start];
 				CodeRemainder& remainder = remainders[unindexedEntry.startIndex + unindexedEntry.filled];
-				codesIndex[index] = MaxSize + unindexedEntry.startIndex;
+//				std::cout << "Setting index at " << int(code.start) << " to " << (MaxSize + unindexedEntry.startIndex) << std::endl;
+				codesIndex[code.start] = MaxSize + unindexedEntry.startIndex;
 				unindexedEntry.filled++;
-				remainder.remainder = (code.code << (16 - code.length)); // The upper bits are cut
+				remainder.remainder = code.ending; // The upper bits are cut
 				remainder.bitsLeft = code.length - 8;
 				remainder.index = i;
 				if (unindexedEntry.filled == unindexedEntry.quantity)
@@ -599,11 +606,12 @@ public:
 		});
 
 		// Longer codes than a byte are indexed specially
-		static constexpr std::array<uint8_t, 9> startMasks = { 0x00, 0x80, 0xc0, 0xe0, 0xf0, 0xf8, 0xfc, 0xfe, 0xff };
+//		static constexpr std::array<uint8_t, 9> startMasks = { 0x00, 0x80, 0xc0, 0xe0, 0xf0, 0xf8, 0xfc, 0xfe, 0xff };
+		static constexpr std::array<uint8_t, 9> endMasks = { 0x00, 0x01, 0x03, 0x07, 0x0f, 0x1f, 0x3f, 0x7f, 0xff };
 		if (word >= MaxSize) {
 			reader.peekAByteAndConsumeSome([&] (uint8_t peeked) {
 				for (int i = word - MaxSize; i < MaxSize * 2; i++) {
-					if ((peeked & startMasks[remainders[i].bitsLeft]) == remainders[i].remainder) {
+					if ((peeked & endMasks[remainders[i].bitsLeft]) == remainders[i].remainder) {
 						word = remainders[i].index & 0x7fff;
 						return remainders[i].bitsLeft;
 					}
@@ -685,7 +693,7 @@ class DeflateReader {
 				}
 			}
 			while (parent->output.available()) {
-				auto part = input.getBits(7);
+				auto part = input.getBitsBackwardOrder(7);
 				if (part == 0) {
 					return false;
 				}
@@ -710,7 +718,7 @@ class DeflateReader {
 						size = input.parseLongerSize(size);
 					}
 					// Now, the distance. Short distances are simply written, longer distances are written on several more bits
-					auto readingDistance = input.getBits(5);
+					auto readingDistance = input.getBitsBackwardOrder(5);
 					int distance = readingDistance.value() + 1;
 					if (distance > 4) {
 						distance = input.parseLongerDistance(distance);
@@ -798,8 +806,8 @@ public:
 				output.done();
 				return false;
 			}
-			wasLast = bitInput.getBits(1).value();
-			auto compressionType = bitInput.getBits(2);
+			wasLast = bitInput.getBitsBackwardOrder(1).value();
+			auto compressionType = bitInput.getBitsBackwardOrder(2);
 			if (compressionType == 0b00) {
 				BitReader(std::move(bitInput)); // Move it to a temporary and destroy it
 				decodingState.template emplace<LiteralState>(this);
@@ -807,23 +815,23 @@ public:
 				decodingState.template emplace<FixedCodeState>(std::move(bitInput));
 			} else if (compressionType == 0b01) {
 				// Read lengths
-				const int extraCodes = bitInput.getBitsForwardOrder(5); // Will be used later
+				const int extraCodes = bitInput.getBits(5); // Will be used later
 				constexpr int maximumExtraCodes = 29;
 				if (extraCodes > maximumExtraCodes) [[unlikely]] {
 					throw std::runtime_error("Impossible number of extra codes");
 				}
-				const int distanceCodes = bitInput.getBitsForwardOrder(5) + 1; // Will be used later
+				const int distanceCodes = bitInput.getBits(5) + 1; // Will be used later
 				if (distanceCodes > 31) [[unlikely]] {
 					throw std::runtime_error("Impossible number of distance codes");
 				}
-				const int codeLengthCount = bitInput.getBitsForwardOrder(4) + 4;
+				const int codeLengthCount = bitInput.getBits(4) + 4;
 				if (codeLengthCount > 19) [[unlikely]]
 						throw std::runtime_error("Invalid distance code count");
 
 				// Read Huffman code lengths
 				std::array<uint8_t, codeCodingReorder.size()> codeCodingLengths = {};
 				for (int i = 0; i < codeLengthCount; i++) {
-					codeCodingLengths[codeCodingReorder[i]] = bitInput.getBitsForwardOrder(3);
+					codeCodingLengths[codeCodingReorder[i]] = bitInput.getBits(3);
 				}
 
 				// Generate Huffman codes for lengths
@@ -833,11 +841,11 @@ public:
 				for (int size = 1; size <= 8; size++) {
 					for (int i = 0; i < std::ssize(codeCoding); i++)
 						if (codeCodingLengths[i] == size) {
-							codeCoding[i] = nextCodeCoding;
 
-							for (int code = codeCoding[i] << (8 - size); code < (codeCoding[i] + 1) << (8 - size); code++) {
-								codeCodingLookup[code] = i;
+							for (int code = nextCodeCoding << (8 - size); code < (nextCodeCoding + 1) << (8 - size); code++) {
+								codeCodingLookup[reversedBytes[code]] = i;
 							}
+							codeCoding[i] = reversedBytes[nextCodeCoding];
 
 							nextCodeCoding++;
 						}
@@ -997,7 +1005,7 @@ struct IGzFileInfo {
 	IGzFileInfo(Detail::ByteInput<Settings>& input) {
 		typename Settings::Checksum checksum = {};
 		auto check = [&checksum] (auto num) -> uint32_t {
-			std::array<uint8_t, sizeof(num)> asBytes;
+			std::array<uint8_t, sizeof(num)> asBytes = {};
 			memcpy(asBytes.data(), &num, asBytes.size());
 			return checksum(asBytes);
 		};
