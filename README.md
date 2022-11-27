@@ -73,7 +73,7 @@ std::vector<char> decompressed = Ezgz::IGzFile<Settings>("data.gz").readAll();
 If including `fstream` is undesirable, the `EZGZ_NO_FILE` macro can be defined to remove the constructors that accept file names. This does not restrict usability much.
 
 ## Performance
-Decompression speeds over 250 MiB/s are possible on modern CPUs, making it about 10% faster than `zlib`. It was tested on the standard Silesia Corpus file, compressed for minimum size.
+Decompression is about 20% faster than `zlib`, decompression speeds over 250 MiB/s are possible on modern CPUs. It was tested on the standard Silesia Corpus file, compressed for minimum size.
 
 Using it through `std::ostream` has no noticeable impact on performance but any type of parsing will impact it significantly.
 

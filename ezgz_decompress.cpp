@@ -18,21 +18,20 @@ int main(int argc, char** argv) {
 		return 2;
 	}
 	ssize_t inputSize = std::filesystem::file_size(inputName);
-	std::string outputName = inputName.substr(0, inputName.find(".gz"));
 
 	EzGz::IGzStream decompressor(inputName);
 	decompressor.exceptions(std::ifstream::failbit);
-	std::ofstream output(outputName, std::ios::binary);
+	std::ofstream output(decompressor.info().name, std::ios::binary);
 	output.exceptions(std::ifstream::failbit);
 
 	std::chrono::steady_clock::time_point startTime = std::chrono::steady_clock::now();
 	output << decompressor.rdbuf();
 	output.close();
 	std::chrono::steady_clock::time_point endTime = std::chrono::steady_clock::now();
-	std::chrono::microseconds duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime);
 
-	ssize_t outputSize = std::filesystem::file_size(outputName);
+	ssize_t outputSize = std::filesystem::file_size(decompressor.info().name);
 	std::cout << "Compression ratio was " << (float(inputSize) / outputSize * 100) << "%" << std::endl;
+	std::chrono::microseconds duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime);
 	std::cout << "Decompressed " << outputSize << " bytes at speed " << ((float(outputSize) / (1024 * 1024)) / (float(duration.count()) / 1000000)) << " MiB/s" << std::endl;
 
 }

@@ -468,27 +468,29 @@ public:
 template <int MaxSize, typename ReaderType>
 class EncodedTable {
 	ReaderType& reader;
-	struct CodeEntry {
-		uint8_t start = 0;
-		uint8_t ending = 0;
-		uint8_t length = 0; // 0 if unused
+	struct CodeIndexEntry {
+		int16_t word = 0;
+		int8_t length = 0;
+		bool valid = false;
 	};
-	std::array<CodeEntry, MaxSize> codes = {};
+	std::array<CodeIndexEntry, 256> codesIndex = {}; // If value is greater than MaxSize, it's a remainder at index value minus MaxSize
 	struct CodeRemainder {
 		uint8_t remainder = 0;
 		uint8_t bitsLeft = 0;
 		uint16_t index = 0; // bit or with 0x8000 if it's the last one in sequence
 	};
 	std::array<CodeRemainder, MaxSize> remainders = {};
-	std::array<int, 256> codesIndex = {}; // If value is greater than MaxSize, it's a remainder at index value minus MaxSize
-
-	static constexpr int UNINDEXED = -1;
-	static constexpr int UNUSED = -2;
 
 public:
 	EncodedTable(ReaderType& reader, int realSize, std::array<uint8_t, 256> codeCodingLookup, std::array<uint8_t, codeCodingReorder.size()> codeCodingLengths)
 	: reader(reader) {
 		std::array<int, 17> quantities = {};
+		struct CodeEntry {
+			uint8_t start = 0;
+			uint8_t ending = 0;
+			uint8_t length = 0;
+		};
+		std::array<CodeEntry, MaxSize> codes = {};
 
 		// Read the Huffman-encoded Huffman codes
 		for (int i = 0; i < realSize; ) {
@@ -544,13 +546,14 @@ public:
 						if (size <= 8) [[likely]] {
 							codes[i].start = reversedBytes[firstPart];
 							for (int code = codes[i].start >> (8 - size); code < std::ssize(codesIndex); code += (1 << size)) {
-								codesIndex[code] = i;
+								codesIndex[code].word = i;
+								codesIndex[code].length = size;
+								codesIndex[code].valid = true;
 							}
 						} else {
 							uint8_t start = reversedBytes[uint8_t(nextCode >> (size - 8))];
-//							std::cout << "Code for " << i << " is " << size << " bytes long, prefix " << int(start) << std::endl;
 							codes[i].start = start;
-							codesIndex[start] = UNINDEXED;
+							codesIndex[start].valid = true;
 							unindexedEntries[start].quantity++;
 							codes[i].ending = reversedBytes[uint8_t(nextCode)] >> (16 - size);
 						}
@@ -567,11 +570,6 @@ public:
 			entry.startIndex = currentStartIndex;
 			currentStartIndex += entry.quantity;
 		}
-//		for (int i = 0; i < std::ssize(unindexedEntries); i++) {
-//			auto& entry = unindexedEntries[i];
-//			if (entry.quantity > 0)
-//				std::cout << "Unindexed " << i << ": quantity " << entry.quantity << ", startIndex " << entry.startIndex << std::endl;
-//		}
 
 		// Index the longer parts
 		for (int i = 0; i < std::ssize(codes); i++) {
@@ -579,8 +577,7 @@ public:
 			if (code.length > 8) {
 				UnindexedEntry& unindexedEntry = unindexedEntries[code.start];
 				CodeRemainder& remainder = remainders[unindexedEntry.startIndex + unindexedEntry.filled];
-//				std::cout << "Setting index at " << int(code.start) << " to " << (MaxSize + unindexedEntry.startIndex) << std::endl;
-				codesIndex[code.start] = MaxSize + unindexedEntry.startIndex;
+				codesIndex[code.start].word = MaxSize + unindexedEntry.startIndex;
 				unindexedEntry.filled++;
 				remainder.remainder = code.ending; // The upper bits are cut
 				remainder.bitsLeft = code.length - 8;
@@ -593,20 +590,18 @@ public:
 
 	int readWord() {
 		int word = 0;
-		uint8_t firstByte = 0;
 		reader.peekAByteAndConsumeSome([&] (uint8_t peeked) {
-			firstByte = peeked;
-			word = codesIndex[peeked];
+			const CodeIndexEntry entry = codesIndex[peeked];
+			word = entry.word;
 			if (word >= MaxSize) {
 				return 8;
-			} else if (word == UNUSED) {
+			} else if (!entry.valid) {
 				throw std::runtime_error("Unknown Huffman code (not even first 8 bits)");
 			}
-			return int(codes[word].length);
+			return int(entry.length);
 		});
 
 		// Longer codes than a byte are indexed specially
-//		static constexpr std::array<uint8_t, 9> startMasks = { 0x00, 0x80, 0xc0, 0xe0, 0xf0, 0xf8, 0xfc, 0xfe, 0xff };
 		static constexpr std::array<uint8_t, 9> endMasks = { 0x00, 0x01, 0x03, 0x07, 0x0f, 0x1f, 0x3f, 0x7f, 0xff };
 		if (word >= MaxSize) {
 			reader.peekAByteAndConsumeSome([&] (uint8_t peeked) {
