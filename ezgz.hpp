@@ -100,18 +100,33 @@ public:
 class FastCrc32 {
 	uint32_t state = 0xffffffffu;
 
-public:
-	uint32_t operator() () { return ~state; }
-	uint32_t operator() (std::span<const uint8_t> input) {
-		constexpr int chunkSize = 16;
-		constexpr std::array<const std::array<uint32_t, 256>, chunkSize> lookupTables = {
+	constexpr static int chunkSize = 16;
+	struct CodingChunk {
+		std::array<uint8_t, 16> chunk;
+
+		constexpr static std::array<const std::array<uint32_t, 256>, chunkSize> lookupTables = {
 			Detail::CrcLookupTable<0>::data, Detail::CrcLookupTable<1>::data, Detail::CrcLookupTable<2>::data, Detail::CrcLookupTable<3>::data,
 			Detail::CrcLookupTable<4>::data, Detail::CrcLookupTable<5>::data, Detail::CrcLookupTable<6>::data, Detail::CrcLookupTable<7>::data,
 			Detail::CrcLookupTable<8>::data, Detail::CrcLookupTable<9>::data, Detail::CrcLookupTable<10>::data, Detail::CrcLookupTable<11>::data,
 			Detail::CrcLookupTable<12>::data, Detail::CrcLookupTable<13>::data, Detail::CrcLookupTable<14>::data, Detail::CrcLookupTable<15>::data};
 
+		template <int Index = 0, int Size = chunkSize>
+		uint32_t process() {
+			if constexpr(Size == 1) {
+				return lookupTables[chunkSize - 1 - Index][chunk[Index]];
+			} else {
+				return process<Index, Size / 2>() ^ process<Index + Size / 2, Size / 2>();
+			}
+		}
+	};
+
+public:
+	uint32_t operator() () { return ~state; }
+	uint32_t operator() (std::span<const uint8_t> input) {
 		ptrdiff_t position = 0;
 		for ( ; position + chunkSize < std::ssize(input); position += chunkSize) {
+			CodingChunk chunk;
+			memcpy(chunk.chunk.data() + sizeof(state), input.data() + position + sizeof(state), chunkSize - sizeof(state));
 			union {
 				std::array<uint8_t, sizeof(state)> bytes;
 				uint32_t number = 0;
@@ -122,17 +137,10 @@ public:
 					std::swap(stateBytes.bytes[i], stateBytes.bytes[std::ssize(stateBytes.bytes) - 1 - i]);
 				}
 			}
-			uint32_t firstBytes = 0;
-			memcpy(&firstBytes, &input[position], sizeof(firstBytes));
-			stateBytes.number ^= firstBytes;
+			stateBytes.number ^= *reinterpret_cast<const uint32_t*>(input.data() + position);
+			memcpy(chunk.chunk.data(), reinterpret_cast<const uint8_t*>(&stateBytes.number), sizeof(state));
 
-			state = 0;
-			for (int i = 0; i < std::ssize(stateBytes.bytes); i++) {
-				state ^= lookupTables[chunkSize - 1 - i][stateBytes.bytes[i]];
-			}
-			for (int i = std::ssize(stateBytes.bytes); i < chunkSize; i++) {
-				state ^= lookupTables[chunkSize - 1 - i][input[position + i]];
-			}
+			state = chunk.process();
 		}
 
 		for ( ; position < std::ssize(input); position++) {
