@@ -160,23 +160,28 @@ struct DefaultDecompressionSettings : MinDecompressionSettings {
 
 namespace Detail {
 
+template <typename Builder>
+struct ArrayFiller {
+	Builder builder;
+	using BuildingType = decltype(builder(0));
+	constexpr ArrayFiller(Builder&& builder) : builder(std::move(builder)) {}
+
+	template <size_t Size>
+	constexpr operator std::array<BuildingType, Size>() {
+		return build(std::make_index_sequence<Size>());
+	}
+private:
+	template <size_t... Indexes>
+	constexpr std::array<BuildingType, sizeof...(Indexes)> build(std::index_sequence<Indexes...>) {
+		return std::array<BuildingType, sizeof...(Indexes)>{builder(Indexes)...};
+	}
+};
+
 static constexpr std::array<uint8_t, 19> codeCodingReorder = {16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15};
 
-static constexpr std::array<uint8_t, 256> reversedBytes = {0x0, 0x80, 0x40, 0xc0, 0x20, 0xa0, 0x60, 0xe0, 0x10,
-		0x90, 0x50, 0xd0, 0x30, 0xb0, 0x70, 0xf0, 0x08, 0x88, 0x48, 0xc8, 0x28, 0xa8, 0x68, 0xe8, 0x18, 0x98, 0x58,
-		0xd8, 0x38, 0xb8, 0x78, 0xf8, 0x04, 0x84, 0x44, 0xc4, 0x24, 0xa4, 0x64, 0xe4, 0x14, 0x94, 0x54, 0xd4, 0x34,
-		0xb4, 0x74, 0xf4, 0x0c, 0x8c, 0x4c, 0xcc, 0x2c, 0xac, 0x6c, 0xec, 0x1c, 0x9c, 0x5c, 0xdc, 0x3c, 0xbc, 0x7c,
-		0xfc, 0x02, 0x82, 0x42, 0xc2, 0x22, 0xa2, 0x62, 0xe2, 0x12, 0x92, 0x52, 0xd2, 0x32, 0xb2, 0x72, 0xf2, 0x0a,
-		0x8a, 0x4a, 0xca, 0x2a, 0xaa, 0x6a, 0xea, 0x1a, 0x9a, 0x5a, 0xda, 0x3a, 0xba, 0x7a, 0xfa, 0x6, 0x86, 0x46,
-		0xc6, 0x26, 0xa6, 0x66, 0xe6, 0x16, 0x96, 0x56, 0xd6, 0x36, 0xb6, 0x76, 0xf6, 0x0e, 0x8e, 0x4e, 0xce, 0x2e,
-		0xae, 0x6e, 0xee, 0x1e, 0x9e, 0x5e, 0xde, 0x3e, 0xbe, 0x7e, 0xfe, 0x01, 0x81, 0x41, 0xc1, 0x21, 0xa1, 0x61,
-		0xe1, 0x11, 0x91, 0x51, 0xd1, 0x31, 0xb1, 0x71, 0xf1, 0x09, 0x89, 0x49, 0xc9, 0x29, 0xa9, 0x69, 0xe9, 0x19,
-		0x99, 0x59, 0xd9, 0x39, 0xb9, 0x79, 0xf9, 0x05, 0x85, 0x45, 0xc5, 0x25, 0xa5, 0x65, 0xe5, 0x15, 0x95, 0x55,
-		0xd5, 0x35, 0xb5, 0x75, 0xf5, 0x0d, 0x8d, 0x4d, 0xcd, 0x2d, 0xad, 0x6d, 0xed, 0x1d, 0x9d, 0x5d, 0xdd, 0x3d,
-		0xbd, 0x7d, 0xfd, 0x03, 0x83, 0x43, 0xc3, 0x23, 0xa3, 0x63, 0xe3, 0x13, 0x93, 0x53, 0xd3, 0x33, 0xb3, 0x73,
-		0xf3, 0x0b, 0x8b, 0x4b, 0xcb, 0x2b, 0xab, 0x6b, 0xeb, 0x1b, 0x9b, 0x5b, 0xdb, 0x3b, 0xbb, 0x7b, 0xfb, 0x07,
-		0x87, 0x47, 0xc7, 0x27, 0xa7, 0x67, 0xe7, 0x17, 0x97, 0x57, 0xd7, 0x37, 0xb7, 0x77, 0xf7, 0x0f, 0x8f, 0x4f,
-		0xcf, 0x2f, 0xaf, 0x6f, 0xef, 0x1f, 0x9f, 0x5f, 0xdf, 0x3f, 0xbf, 0x7f, 0xff};
+static constexpr std::array<uint8_t, 256> reversedBytes = ArrayFiller([] (int uninverted) constexpr {
+	return uint8_t((uninverted * uint64_t(0x0202020202) & uint64_t(0x010884422010)) % 0x3ff); // Reverse a byte
+});
 
 // Provides access to input stream as chunks of contiguous data
 template <DecompressionSettings Settings>
@@ -300,50 +305,12 @@ public:
 			input->returnBytes(bitsLeft >> 3);
 	}
 
-	class BitGroup {
-		BitReader* parent = nullptr;
-		uint64_t data = 0;
-		int bits = 0;
-	public:
-		constexpr BitGroup(BitReader* parent, uint64_t data, int bits) : parent(parent), data(data), bits(bits) {}
-
-		void getMore(int amount) {
-			uint64_t added = parent->getBitsBackwardOrder(amount).data;
-			data <<= amount;
-			data |= added;
-			bits += amount;
-		}
-
-		uint64_t value() const {
-			return data;
-		}
-
-		int getBitCount() const {
-			return bits;
-		}
-
-		auto operator<=>(uint64_t other) {
-			return data <=> other;
-		}
-		bool operator==(uint64_t other) {
-			return data == other;
-		}
-
-	};
-
-	// Up to 8 bits, unwanted bits blanked
-	BitGroup getBitsBackwardOrder(int amount) {
-		refillIfNeeded();
-		uint8_t result = reversedBytes[uint8_t(data)];
-		data >>= amount;
-		bitsLeft -= amount;
-		result >>= 8 - amount;
-		return BitGroup(this, result, amount);
-	}
-
 	// Up to 16 bits, unwanted bits blanked
 	uint16_t getBits(int amount) {
 		refillIfNeeded();
+		if (bitsLeft < amount) [[unlikely]] {
+			throw std::runtime_error("Run out of data");
+		}
 		uint16_t result = data;
 		data >>= amount;
 		bitsLeft -= amount;
@@ -357,6 +324,9 @@ public:
 		refillIfNeeded();
 		uint8_t pulled = data;
 		auto consumed = readAndTellHowMuchToConsume(pulled);
+		if (bitsLeft < consumed) [[unlikely]] {
+			throw std::runtime_error("Run out of data");
+		}
 		data >>= consumed;
 		bitsLeft -= consumed;
 	}
@@ -695,38 +665,56 @@ class DeflateReader {
 					return true; // Out of space
 				}
 			}
-			while (parent->output.available()) {
-				auto part = input.getBitsBackwardOrder(7);
-				if (part == 0) {
-					return false;
-				}
 
-				if (part >= 0b0011000 && part <= 0b1011111) {
-					part.getMore(1);
-					parent->output.addByte(uint8_t(part.value() - 0b00110000)); // Bits 0-143
-				} else if (part >= 0b1100100) {
-					part.getMore(2);
-					parent->output.addByte(uint8_t(part.value() - (0b110010000 - 144))); // Bits 144-255
+			struct CodeEntry {
+				int8_t length = 7;
+				int16_t code = 0;
+			};
+			constexpr static std::array<CodeEntry, 256> codeIndex = ArrayFiller([] (uint8_t oneByteReversed) constexpr {
+				uint8_t oneByte = reversedBytes[oneByteReversed];
+				if (oneByte < 0b00000010) {
+					return CodeEntry{7, 256};
+				} else if (oneByte < 0b00110000) {
+					return CodeEntry{7, (oneByte >> 1) - 1 + 257};
+				} else if (oneByte < 0b11000000) {
+					return CodeEntry{8, oneByte - 0b00110000};
+				} else if (oneByte < 0b11001000) {
+					return CodeEntry{8, oneByte - 0b11000000 + 280};
 				} else {
-					int size = 0;
-					if (part <= 0010111) {
-						// 7 bit lookback
-						size = part.value() + 2; // First value means size 3
-					} else {
-						// 8 bit lookback, would be range 1100000 - 1100011
-						part.getMore(1);
-						size = part.value() + (25 - 0b11000000); // Placed after the 21 possible values of the 7 bit versions (+3)
+					return CodeEntry{8, oneByte - 0b11001000 + 144};
+				}
+			});
+
+			while (parent->output.available()) {
+				CodeEntry code = {};
+				input.peekAByteAndConsumeSome([&code] (uint8_t peeked) {
+					code = codeIndex[peeked];
+					return code.length;
+				});
+
+				if (code.code == 256) [[unlikely]] {
+					break;
+				} else if (code.code > 256) {
+					int length = code.code - 254;
+					if (length > 10) {
+						length = input.parseLongerSize(length);
 					}
-					if (size > 10) {
-						size = input.parseLongerSize(size);
-					}
-					// Now, the distance. Short distances are simply written, longer distances are written on several more bits
-					auto readingDistance = input.getBitsBackwardOrder(5);
-					int distance = readingDistance.value() + 1;
+					static constexpr std::array<uint8_t, 32> lengthDictionary = ArrayFiller([] (int uninverted) constexpr {
+						uint8_t reversed = uint8_t((uninverted * uint64_t(0x0202020202) & uint64_t(0x010884422010)) % 0x3ff);
+						return uint8_t((reversed >> 3) + 1); // Convert to length word
+					});
+					int distance = lengthDictionary[input.getBits(5)];
 					if (distance > 4) {
 						distance = input.parseLongerDistance(distance);
 					}
-					CopyState::copy(parent->output, size, distance);
+					CopyState::copy(parent->output, length, distance);
+				} else {
+					if (code.code < 144) {
+						parent->output.addByte(code.code);
+					} else {
+						uint8_t full = ((code.code - 144)) << 1 + 144 + input.getBits(1);
+						parent->output.addByte(code.code);
+					}
 				}
 			}
 			return (parent->output.available() == 0);
@@ -809,14 +797,14 @@ public:
 				output.done();
 				return false;
 			}
-			wasLast = bitInput.getBitsBackwardOrder(1).value();
-			auto compressionType = bitInput.getBitsBackwardOrder(2);
+			wasLast = bitInput.getBits(1);
+			int compressionType = bitInput.getBits(2);
 			if (compressionType == 0b00) {
 				BitReader(std::move(bitInput)); // Move it to a temporary and destroy it
 				decodingState.template emplace<LiteralState>(this);
-			} else if (compressionType == 0b10) {
-				decodingState.template emplace<FixedCodeState>(std::move(bitInput));
 			} else if (compressionType == 0b01) {
+				decodingState.template emplace<FixedCodeState>(std::move(bitInput));
+			} else if (compressionType == 0b10) {
 				// Read lengths
 				const int extraCodes = bitInput.getBits(5); // Will be used later
 				constexpr int maximumExtraCodes = 29;

@@ -57,11 +57,10 @@ int main(int, char**) {
 		InputHelper<1> byteReader(data);
 		{
 			BitReader reader(&byteReader);
-			auto readTwoBits = reader.getBitsBackwardOrder(2);
-			doATest(readTwoBits.value(), 0b01u);
-			readTwoBits.getMore(6);
-			readTwoBits.getMore(8);
-			doATest(readTwoBits.value(), 0b0101010101010101u);
+			auto readTwoBits = reader.getBits(2);
+			doATest(readTwoBits, 0b10u);
+			auto readFourteenBits = reader.getBits(14);
+			doATest(readFourteenBits, 0b10101010101010u);
 		}
 
 		{
@@ -71,8 +70,8 @@ int main(int, char**) {
 
 		{
 			BitReader reader(&byteReader);
-			auto readFourBits = reader.getBitsBackwardOrder(4);
-			doATest(readFourBits.value(), 0b0101u);
+			auto readFourBits = reader.getBits(4);
+			doATest(readFourBits, 0b1010u);
 			reader.peekAByteAndConsumeSome([&] (uint8_t byte) {
 				doATest(int(byte), 0b00001010);
 				return 4;
@@ -112,25 +111,22 @@ int main(int, char**) {
 		InputHelper<5> byteReader(data);
 		BitReader reader(&byteReader);
 		{
-			auto readTwoBits = reader.getBitsBackwardOrder(2);
-			doATest(readTwoBits.value(), 0b01u);
-			readTwoBits.getMore(4);
-			doATest(readTwoBits.value(), 0b010101u);
-			doATest(readTwoBits.getBitCount(), 6);
+			auto readTwoBits = reader.getBits(2);
+			doATest(readTwoBits, 0b10u);
+			auto fourMoreBits = reader.getBits(4);
+			doATest(fourMoreBits, 0b1010u);
 		}
 
 		{
-			auto readSevenBits = reader.getBitsBackwardOrder(7);
-			doATest(readSevenBits.value(), 0b0101010u);
+			auto readSevenBits = reader.getBits(7);
+			doATest(readSevenBits, 0b0101010u);
 		}
 
 		{
-			auto readSomeBits = reader.getBitsBackwardOrder(2);
-			readSomeBits.getMore(8);
-			doATest(readSomeBits.value(), 0b1010101010u);
-			readSomeBits.getMore(8);
-			readSomeBits.getMore(5);
-			doATest(readSomeBits.value(), 0b10101010101010101010101u);
+			auto readSomeBits = reader.getBits(10);
+			doATest(readSomeBits, 0b0101010101u);
+			auto readMoreBits = reader.getBits(13);
+			doATest(readMoreBits, 0b1010101010101u);
 		}
 	}
 
@@ -142,14 +138,6 @@ int main(int, char**) {
 		doATest(reader.getBits(2), 0b01u);
 		doATest(reader.getBits(7), 0b1100110u);
 		doATest(reader.getBits(13), 0b1100001001100u);
-
-		{
-			auto readSomeBits = reader.getBitsBackwardOrder(8);
-			readSomeBits.getMore(2);
-			doATest(readSomeBits.value(), 0b1100001111u);
-			readSomeBits.getMore(3);
-			doATest(readSomeBits.value(), 0b1100001111100u);
-		}
 	}
 
 	{
@@ -196,7 +184,7 @@ int main(int, char**) {
 		byteReader.getBytes(8);
 
 		BitReader reader(&byteReader);
-		reader.getBitsBackwardOrder(7);
+		reader.getBits(7);
 
 		std::array<uint8_t, codeCodingReorder.size()> codeCodingLengths = {3, 4, 4, 3, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3};
 		std::array<uint8_t, 256> codeCodingLookup = {4, 5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2, 4, 5, 0, 18, 4, 17, 3, 1, 4,
@@ -208,7 +196,7 @@ int main(int, char**) {
 				17, 3, 2, 4, 5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2, 4, 5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2, 4,
 				5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2};
 		EncodedTable<288, decltype(reader)> table(reader, 260, codeCodingLookup, codeCodingLengths);
-		reader.getBitsBackwardOrder(29);
+		reader.getBits(29);
 
 		doATest(table.readWord(), 'R');
 		doATest(table.readWord(), 'R');
@@ -225,14 +213,14 @@ int main(int, char**) {
 		doATest(table.readWord(), 'H');
 		doATest(table.readWord(), 'G');
 		doATest(table.readWord(), 257);
-		reader.getBitsBackwardOrder(3);
+		reader.getBits(3);
 		doATest(table.readWord(), '!');
 		doATest(table.readWord(), ' ');
 		doATest(table.readWord(), 'R');
 		doATest(table.readWord(), 'A');
 		doATest(table.readWord(), 'A');
 		doATest(table.readWord(), 257);
-		reader.getBitsBackwardOrder(4);
+		reader.getBits(4);
 		doATest(table.readWord(), 'R');
 		doATest(table.readWord(), '!');
 	}
