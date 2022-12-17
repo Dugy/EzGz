@@ -713,7 +713,7 @@ class DeflateReader {
 						parent->output.addByte(code.code);
 					} else {
 						uint8_t full = ((code.code - 144)) << 1 + 144 + input.getBits(1);
-						parent->output.addByte(code.code);
+						parent->output.addByte(full);
 					}
 				}
 			}
