@@ -19,10 +19,14 @@
 namespace EzGz {
 
 template <typename T>
-concept DecompressionSettings = std::constructible_from<typename T::Checksum> && requires(typename T::Checksum checksum) {
-	int(T::maxOutputBufferSize);
-	int(T::minOutputBufferSize);
-	int(T::inputBufferSize);
+concept StreamSettings = requires() {
+	int(T::minSize);
+	int(T::maxSize);
+};
+
+template <typename T>
+concept DecompressionSettings = std::constructible_from<typename T::Checksum> && StreamSettings<typename T::Input>
+			&& StreamSettings<typename T::Output> && requires(typename T::Checksum checksum) {
 	int(checksum());
 	int(checksum(std::span<const uint8_t>()));
 	bool(T::verifyChecksum);
@@ -40,9 +44,15 @@ struct NoChecksum { // Noop
 };
 
 struct MinDecompressionSettings {
-	constexpr static int maxOutputBufferSize = 32768 * 2 + 258;
-	constexpr static int minOutputBufferSize = std::min(32768, maxOutputBufferSize / 2); // Max offset + max copy size
-	constexpr static int inputBufferSize = 33000;
+	struct Output {
+		constexpr static int maxSize = 32768 * 2 + 258;
+		constexpr static int minSize = std::min(32768, maxSize / 2); // Max offset + max copy size
+	};
+	struct Input {
+		constexpr static int maxSize = 33000;
+		constexpr static int minSize = 0;
+	};
+
 	using Checksum = NoChecksum;
 	constexpr static bool verifyChecksum = false;
 	using StringType = std::string;
@@ -152,8 +162,15 @@ public:
 };
 
 struct DefaultDecompressionSettings : MinDecompressionSettings {
-	constexpr static int maxOutputBufferSize = 100000;
-	constexpr static int inputBufferSize = 100000;
+	struct Output {
+		constexpr static int maxSize = 100000;
+		constexpr static int minSize = std::min(32768, maxSize / 2); // Max offset + max copy size
+	};
+	struct Input {
+		constexpr static int maxSize = 100000;
+		constexpr static int minSize = 0;
+	};
+
 	using Checksum = FastCrc32;
 	constexpr static bool verifyChecksum = true;
 };
@@ -184,9 +201,9 @@ static constexpr std::array<uint8_t, 256> reversedBytes = ArrayFiller([] (int un
 });
 
 // Provides access to input stream as chunks of contiguous data
-template <DecompressionSettings Settings>
+template <StreamSettings Settings, typename Checksum>
 class ByteInput {
-	std::array<uint8_t, Settings::inputBufferSize + sizeof(uint32_t)> buffer = {};
+	std::array<uint8_t, Settings::maxSize + sizeof(uint32_t)> buffer = {};
 	std::function<int(std::span<uint8_t> batch)> readMore;
 	int position = 0;
 	int filled = 0;
@@ -255,7 +272,7 @@ concept ByteReader = requires(T reader) {
 // Provides optimised access to data from a ByteInput by bits
 template <ByteReader ByteInputType>
 class BitReader {
-	ByteInputType* input;
+	std::decay_t<ByteInputType>* input;
 	int bitsLeft = 0;
 	uint64_t data = 0; // Invariant - lowest bit is the first valid
 	static constexpr int minimumBits = 16; // The specification doesn't require any reading by bits that are longer than 16 bits
@@ -358,13 +375,13 @@ public:
 };
 
 // Handles output of decompressed data, filling bytes from past bytes and chunking. Consume needs to be called to empty it
-template <DecompressionSettings Settings>
+template <StreamSettings Settings, typename Checksum>
 class ByteOutput {
-	std::array<char, Settings::maxOutputBufferSize> buffer = {};
+	std::array<char, Settings::maxSize> buffer = {};
 	int used = 0; // Number of bytes filled in the buffer (valid data must start at index 0)
 	int consumed = 0; // The last byte that was returned by consume()
 	bool expectsMore = true; // If we expect more data to be present
-	typename Settings::Checksum checksum = {};
+	Checksum checksum = {};
 
 	void checkSize(int added = 1) {
 		if (used + added > std::ssize(buffer)) [[unlikely]] {
@@ -390,7 +407,7 @@ public:
 		// Clean the space from the previous consume() call
 		int bytesKept = std::min(bytesToKeep, consumed);
 		int removing = consumed - bytesKept;
-		int minimum = Settings::minOutputBufferSize - used + consumed; // Ensure we keep enough bytes that the operation will end with less valid data in the buffer than the mandatory minimum
+		int minimum = Settings::minSize - used + consumed; // Ensure we keep enough bytes that the operation will end with less valid data in the buffer than the mandatory minimum
 		if (bytesKept < minimum) {
 			bytesKept = minimum;
 			removing = consumed - bytesKept;
@@ -600,29 +617,29 @@ public:
 	}
 };
 
-template <DecompressionSettings Settings>
+template <StreamSettings Settings, typename Checksum>
 template <int MaxTableSize>
-auto ByteInput<Settings>::encodedTable(int realSize, const std::array<uint8_t, 256>& codeCodingLookup, const std::array<uint8_t, codeCodingReorder.size()>& codeCodingLengths) {
-	return EncodedTable<MaxTableSize, ByteInput<Settings>>(*this, realSize, codeCodingLookup, codeCodingLengths);
+auto ByteInput<Settings, Checksum>::encodedTable(int realSize, const std::array<uint8_t, 256>& codeCodingLookup, const std::array<uint8_t, codeCodingReorder.size()>& codeCodingLengths) {
+	return EncodedTable<MaxTableSize, ByteInput<Settings, Checksum>>(*this, realSize, codeCodingLookup, codeCodingLengths);
 }
 
 // Higher level class handling the overall state of parsing. Implemented as a state machine to allow pausing when output is full.
 template <DecompressionSettings Settings>
 class DeflateReader {
-	ByteInput<Settings>& input;
-	ByteOutput<Settings>& output;
+	ByteInput<typename Settings::Input, typename Settings::Checksum>& input;
+	ByteOutput<typename Settings::Output, typename Settings::Checksum>& output;
 
 	struct CopyState {
 		int copyDistance = 0;
 		int copyLength = 0;
 
-		bool restart(ByteOutput<Settings>& output) {
+		bool restart(decltype(DeflateReader::output)& output) {
 			int copying = std::min(output.available(), copyLength);
 			output.repeatSequence(copying, copyDistance);
 			copyLength -= copying;
 			return (copyLength == 0);
 		}
-		bool copy(ByteOutput<Settings>& output, int length, int distance) {
+		bool copy(decltype(DeflateReader::output)& output, int length, int distance) {
 			copyLength = length;
 			copyDistance = distance;
 			return restart(output);
@@ -656,8 +673,8 @@ class DeflateReader {
 	};
 
 	struct FixedCodeState : CopyState {
-		BitReader<ByteInput<Settings>> input;
-		FixedCodeState(BitReader<ByteInput<Settings>>&& input) : input(std::move(input)) {}
+		BitReader<std::decay_t<decltype(DeflateReader::input)>> input;
+		FixedCodeState(decltype(input)&& input) : input(std::move(input)) {}
 
 		bool parseSome(DeflateReader* parent) {
 			if (CopyState::copyLength > 0) { // Resume copying if necessary
@@ -675,13 +692,13 @@ class DeflateReader {
 				if (oneByte < 0b00000010) {
 					return CodeEntry{7, 256};
 				} else if (oneByte < 0b00110000) {
-					return CodeEntry{7, (oneByte >> 1) - 1 + 257};
+					return CodeEntry{7, int16_t((oneByte >> 1) - 1 + 257)};
 				} else if (oneByte < 0b11000000) {
-					return CodeEntry{8, oneByte - 0b00110000};
+					return CodeEntry{8, int16_t(oneByte - 0b00110000)};
 				} else if (oneByte < 0b11001000) {
-					return CodeEntry{8, oneByte - 0b11000000 + 280};
+					return CodeEntry{8, int16_t(oneByte - 0b11000000 + 280)};
 				} else {
-					return CodeEntry{8, oneByte - 0b11001000 + 144};
+					return CodeEntry{8, int16_t(oneByte - 0b11001000 + 144)};
 				}
 			});
 
@@ -722,9 +739,9 @@ class DeflateReader {
 	};
 
 	struct DynamicCodeState : CopyState {
-		BitReader<ByteInput<Settings>> input;
-		EncodedTable<288, BitReader<ByteInput<Settings>>> codes;
-		EncodedTable<31, BitReader<ByteInput<Settings>>> distanceCode;
+		BitReader<std::decay_t<decltype(DeflateReader::input)>> input;
+		EncodedTable<288, decltype(input)> codes;
+		EncodedTable<31, decltype(input)> distanceCode;
 
 		DynamicCodeState(decltype(input)&& inputMoved, int codeCount, int distanceCodeCount, const std::array<uint8_t, 256>& codeCodingLookup,
 						const std::array<uint8_t, codeCodingReorder.size()>& codeCodingLengths)
@@ -766,17 +783,17 @@ class DeflateReader {
 	bool wasLast = false;
 
 public:
-	DeflateReader(ByteInput<Settings>& input, ByteOutput<Settings>& output) : input(input), output(output) {}
+	DeflateReader(decltype(input)& input, decltype(output)& output) : input(input), output(output) {}
 
 	// Returns whether there is more work to do
 	bool parseSome() {
 		while (true) {
-			BitReader<ByteInput<Settings>> bitInput(nullptr);
+			BitReader<std::decay_t<decltype(input)>> bitInput(nullptr);
 			if (LiteralState* state = std::get_if<LiteralState>(&decodingState)) {
 				if (state->parseSome(this)) {
 					return true;
 				}
-				bitInput = BitReader<ByteInput<Settings>>(&input);
+				bitInput = decltype(bitInput)(&input);
 			} else if (FixedCodeState* state = std::get_if<FixedCodeState>(&decodingState)) {
 				if (state->parseSome(this)) {
 					return true;
@@ -788,7 +805,7 @@ public:
 				}
 				bitInput = std::move(state->input);
 			} else {
-				bitInput = BitReader<ByteInput<Settings>>(&input);
+				bitInput = decltype(bitInput)(&input);
 			}
 			decodingState = std::monostate();
 
@@ -857,9 +874,9 @@ public:
 template <DecompressionSettings Settings = DefaultDecompressionSettings>
 std::vector<char> readDeflateIntoVector(std::function<int(std::span<uint8_t> batch)> readMoreFunction) {
 	std::vector<char> result;
-	Detail::ByteInput<Settings> input(readMoreFunction);
-	Detail::ByteOutput<Settings> output;
-	Detail::DeflateReader reader(input, output);
+	Detail::ByteInput<typename Settings::Input, typename Settings::Checksum> input(readMoreFunction);
+	Detail::ByteOutput<typename Settings::Output, typename Settings::Checksum> output;
+	Detail::DeflateReader<Settings> reader(input, output);
 	bool workToDo = false;
 	do {
 		workToDo = reader.parseSome();
@@ -884,8 +901,8 @@ std::vector<char> readDeflateIntoVector(std::span<const uint8_t> allData) {
 template <DecompressionSettings Settings = DefaultDecompressionSettings>
 class IDeflateArchive {
 protected:
-	Detail::ByteInput<Settings> input;
-	Detail::ByteOutput<Settings> output;
+	Detail::ByteInput<typename Settings::Input, typename Settings::Checksum> input;
+	Detail::ByteOutput<typename Settings::Output, typename Settings::Checksum> output;
 	Detail::DeflateReader<Settings> deflateReader = {input, output};
 	bool done = false;
 
@@ -992,9 +1009,9 @@ struct IGzFileInfo {
 	StringType comment;
 	bool probablyText = false;
 
-	template <DecompressionSettings Settings>
-	IGzFileInfo(Detail::ByteInput<Settings>& input) {
-		typename Settings::Checksum checksum = {};
+	template <StreamSettings InputSettings, typename ChecksumType>
+	IGzFileInfo(Detail::ByteInput<InputSettings, ChecksumType>& input) {
+		ChecksumType checksum = {};
 		auto check = [&checksum] (auto num) -> uint32_t {
 			std::array<uint8_t, sizeof(num)> asBytes = {};
 			memcpy(asBytes.data(), &num, asBytes.size());

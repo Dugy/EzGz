@@ -5,19 +5,24 @@
 
 template <int Size>
 struct SettingsWithInputSize : EzGz::DefaultDecompressionSettings {
-	constexpr static int inputBufferSize = Size;
+	struct Input : DefaultDecompressionSettings::Input {
+		constexpr static int maxSize = Size;
+	};
 };
 
 template <int MaxSize, int MinSize>
 struct SettingsWithOutputSize : EzGz::DefaultDecompressionSettings {
-	constexpr static int maxOutputBufferSize = MaxSize;
-	constexpr static int minOutputBufferSize = MinSize;
+	struct Output {
+		constexpr static int maxSize = MaxSize;
+		constexpr static int minSize = MinSize;
+	};
 };
 
 template <int Size>
-struct InputHelper : EzGz::Detail::ByteInput<SettingsWithInputSize<Size>> {
+struct InputHelper : EzGz::Detail::ByteInput<typename SettingsWithInputSize<Size>::Input, typename SettingsWithInputSize<Size>::Checksum> {
 	InputHelper(std::span<const uint8_t> source)
-	: EzGz::Detail::ByteInput<SettingsWithInputSize<Size>>([source, position = 0] (std::span<uint8_t> toFill) mutable -> int {
+	: EzGz::Detail::ByteInput<typename SettingsWithInputSize<Size>::Input, typename SettingsWithInputSize<Size>::Checksum>(
+				[source, position = 0] (std::span<uint8_t> toFill) mutable -> int {
 		int filling = std::min(source.size() - position, toFill.size());
 //		std::cout << "Providing " << filling << " bytes of data, " << (source.size() - position - filling) << " left" << std::endl;
 		if(filling != 0)
@@ -236,7 +241,7 @@ int main(int, char**) {
 		};
 
 		{
-			ByteOutput<SettingsWithOutputSize<4, 2>> output = {};
+			ByteOutput<SettingsWithOutputSize<4, 2>::Output, NoChecksum> output = {};
 			auto inspect = inspectStart;
 			output.addByte('W');
 			output.addByte('h');
@@ -288,7 +293,7 @@ int main(int, char**) {
 			inspect(output.consume());
 		}
 		{
-			ByteOutput<SettingsWithOutputSize<8, 3>> output = {};
+			ByteOutput<SettingsWithOutputSize<8, 3>::Output, NoChecksum> output = {};
 			auto inspect = inspectStart;
 			output.addByte('W');
 			output.addByte('h');
