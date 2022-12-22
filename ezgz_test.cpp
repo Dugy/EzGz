@@ -3,10 +3,12 @@
 #include <string>
 #include "ezgz.hpp"
 
-template <int Size>
+template <int MaximumSize, int MinimumSize = 0, int LookAheadSize = sizeof(uint32_t)>
 struct SettingsWithInputSize : EzGz::DefaultDecompressionSettings {
 	struct Input : DefaultDecompressionSettings::Input {
-		constexpr static int maxSize = Size;
+		constexpr static int maxSize = MaximumSize;
+		constexpr static int minSize = MinimumSize;
+		constexpr static int lookAheadSize = LookAheadSize;
 	};
 };
 
@@ -18,10 +20,10 @@ struct SettingsWithOutputSize : EzGz::DefaultDecompressionSettings {
 	};
 };
 
-template <int Size>
-struct InputHelper : EzGz::Detail::ByteInput<typename SettingsWithInputSize<Size>::Input, typename SettingsWithInputSize<Size>::Checksum> {
+template <int MaxSize, int MinSize = 0, int LookAheadSize = sizeof(uint32_t)>
+struct InputHelper : EzGz::Detail::ByteInput<typename SettingsWithInputSize<MaxSize, MinSize, LookAheadSize>::Input, typename SettingsWithInputSize<MaxSize, MinSize, LookAheadSize>::Checksum> {
 	InputHelper(std::span<const uint8_t> source)
-	: EzGz::Detail::ByteInput<typename SettingsWithInputSize<Size>::Input, typename SettingsWithInputSize<Size>::Checksum>(
+	: EzGz::Detail::ByteInput<typename SettingsWithInputSize<MaxSize, MinSize, LookAheadSize>::Input, typename SettingsWithInputSize<MaxSize, MinSize, LookAheadSize>::Checksum>(
 				[source, position = 0] (std::span<uint8_t> toFill) mutable -> int {
 		int filling = std::min(source.size() - position, toFill.size());
 //		std::cout << "Providing " << filling << " bytes of data, " << (source.size() - position - filling) << " left" << std::endl;
@@ -55,6 +57,60 @@ int main(int, char**) {
 
 	using namespace EzGz;
 	using namespace Detail;
+
+	{
+		std::cout << "Testing basic input" << std::endl;
+		constexpr static std::array<uint8_t, 5> data = { 'a', 'b', 'c', 'd', 'e' };
+		InputHelper<1> byteReader(data);
+		doATest(byteReader.getInteger<char>(), 'a');
+		auto nextTwoBytes = byteReader.getRange(2);
+		doATest(nextTwoBytes.size() != 0u, true);
+		doATest(nextTwoBytes[0], 'b');
+		if (nextTwoBytes.size() == 2u) {
+			doATest(nextTwoBytes[1], 'c');
+		} else {
+			auto nextOneByte = byteReader.getRange(1);
+			doATest(nextOneByte.size(), 1u);
+			doATest(nextOneByte[0], 'c');
+		}
+		byteReader.getBytes(2);
+		byteReader.returnBytes(1);
+		doATest(byteReader.getInteger<char>(), 'e');
+	}
+	{
+		std::cout << "Testing basic input 2" << std::endl;
+		constexpr static std::array<uint8_t, 10> data = { 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j' };
+
+		InputHelper<4, 3, 1> byteReader(data);
+		doATest(byteReader.getInteger<char>(), 'a');
+		doATest(byteReader.getAtPosition(byteReader.getPosition() - 1), 'a');
+		doATest(byteReader.getAtPosition(byteReader.getPosition()), 'b');
+		doATest(byteReader.availableAhead() >= 1, true);
+
+		int consumed = 0;
+		while (consumed < 3) {
+			consumed += byteReader.getRange(3 - consumed).size();
+		}
+		doATest(byteReader.getPosition() + byteReader.getPositionStart(), 4);
+		for (int i = 1; i <= 4; i++) {
+			doATest(byteReader.getAtPosition(byteReader.getPosition() + i - 4), data[i]);
+		}
+		doATest(byteReader.availableAhead() >= 1, true);
+
+		doATest(byteReader.getInteger<char>(), 'e');
+		consumed = 0;
+		while (consumed < 3) {
+			consumed += byteReader.getRange(3 - consumed).size();
+		}
+		for (int i = 5; i <= 8; i++) {
+			doATest(byteReader.getAtPosition(byteReader.getPosition() + i - 8), data[i]);
+		}
+		doATest(byteReader.availableAhead() >= 1, true);
+		doATest(byteReader.getInteger<char>(), 'i');
+		doATest(byteReader.availableAhead(), 1);
+		doATest(byteReader.getInteger<char>(), 'j');
+		doATest(byteReader.availableAhead(), 0);
+	}
 
 	{
 		std::cout << "Testing chunking" << std::endl;
@@ -201,7 +257,8 @@ int main(int, char**) {
 				17, 3, 2, 4, 5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2, 4, 5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2, 4,
 				5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2};
 		EncodedTable<288, decltype(reader)> table(reader, 260, codeCodingLookup, codeCodingLengths);
-		reader.getBits(29);
+		reader.getBits(15);
+		reader.getBits(14);
 
 		doATest(table.readWord(), 'R');
 		doATest(table.readWord(), 'R');

@@ -25,7 +25,12 @@ concept StreamSettings = requires() {
 };
 
 template <typename T>
-concept DecompressionSettings = std::constructible_from<typename T::Checksum> && StreamSettings<typename T::Input>
+concept InputStreamSettings = StreamSettings<T> && requires() {
+	int(T::lookAheadSize);
+};
+
+template <typename T>
+concept DecompressionSettings = std::constructible_from<typename T::Checksum> && InputStreamSettings<typename T::Input>
 			&& StreamSettings<typename T::Output> && requires(typename T::Checksum checksum) {
 	int(checksum());
 	int(checksum(std::span<const uint8_t>()));
@@ -49,6 +54,7 @@ struct MinDecompressionSettings {
 		constexpr static int minSize = std::min(32768, maxSize / 2); // Max offset + max copy size
 	};
 	struct Input {
+		constexpr static int lookAheadSize = sizeof(uint32_t);
 		constexpr static int maxSize = 33000;
 		constexpr static int minSize = 0;
 	};
@@ -167,6 +173,7 @@ struct DefaultDecompressionSettings : MinDecompressionSettings {
 		constexpr static int minSize = std::min(32768, maxSize / 2); // Max offset + max copy size
 	};
 	struct Input {
+		constexpr static int lookAheadSize = sizeof(uint32_t);
 		constexpr static int maxSize = 100000;
 		constexpr static int minSize = 0;
 	};
@@ -203,25 +210,35 @@ static constexpr std::array<uint8_t, 256> reversedBytes = ArrayFiller([] (int un
 // Provides access to input stream as chunks of contiguous data
 template <StreamSettings Settings, typename Checksum>
 class ByteInput {
-	std::array<uint8_t, Settings::maxSize + sizeof(uint32_t)> buffer = {};
+	static_assert(Settings::minSize < Settings::maxSize);
+	std::array<uint8_t, Settings::maxSize + Settings::lookAheadSize> buffer = {};
 	std::function<int(std::span<uint8_t> batch)> readMore;
 	int position = 0;
 	int filled = 0;
+	ptrdiff_t positionStart = 0;
+	int lookAheadSize = Settings::lookAheadSize;
+
 	int refillSome() {
-		if (position > std::ssize(buffer) / 2) {
-			filled -= position;
-			memmove(buffer.data(), buffer.data() + position, filled);
-			position = 0;
+		if (position + lookAheadSize >= filled) {
+			int offset = std::max(0, position - Settings::minSize);
+			positionStart += offset;
+			filled -= offset;
+			memmove(buffer.data(), buffer.data() + offset, filled);
+			position -= offset;
 		}
 		int added = readMore(std::span<uint8_t>(buffer.begin() + filled, buffer.end()));
+		if (added == 0) {
+			lookAheadSize = 0;
+			return filled - position;
+		}
 		filled += added;
 		return added;
 	}
 
 	void ensureSize(int bytes) {
-		while ((position) + bytes > filled) [[unlikely]] {
-			int added = refillSome();
-			if (added == 0) {
+		while (position + bytes + lookAheadSize > filled) [[unlikely]] {
+			int refilled = refillSome();
+			if (refilled == 0 && lookAheadSize == 0) {
 				throw std::runtime_error("Unexpected end of stream");
 			}
 		}
@@ -232,7 +249,7 @@ public:
 
 	// Note: May not get as many bytes as necessary, would need to be called multiple times
 	std::span<const uint8_t> getRange(int size) {
-		if (position + size >= filled) {
+		if (position + size + lookAheadSize > filled) {
 			refillSome();
 		}
 		ptrdiff_t start = position;
@@ -246,7 +263,7 @@ public:
 	}
 
 	template <typename IntType>
-	uint64_t getInteger(int bytes = sizeof(IntType)) {
+	IntType getInteger(int bytes = sizeof(IntType)) {
 		IntType result = 0;
 		ensureSize(bytes);
 		memcpy(&result, &buffer[position], bytes);
@@ -257,6 +274,19 @@ public:
 	// Can return only up to the size of the last read
 	void returnBytes(int amount) {
 		position -= amount;
+	}
+
+	int getPosition() const {
+		return position;
+	}
+	ptrdiff_t getPositionStart() const {
+		return positionStart;
+	}
+	uint8_t getAtPosition(int index) const {
+		return buffer[index];
+	}
+	int availableAhead() const {
+		return filled - position;
 	}
 
 	template <int MaxTableSize>
@@ -729,7 +759,7 @@ class DeflateReader {
 					if (code.code < 144) {
 						parent->output.addByte(code.code);
 					} else {
-						uint8_t full = ((code.code - 144)) << 1 + 144 + input.getBits(1);
+						uint8_t full = (((code.code - 144)) << 1) + 144 + input.getBits(1);
 						parent->output.addByte(full);
 					}
 				}
@@ -918,9 +948,6 @@ public:
 		}
 		file->read(reinterpret_cast<char*>(batch.data()), batch.size());
 		int bytesRead = file->gcount();
-		if (bytesRead == 0) {
-			throw std::runtime_error("Truncated file");
-		}
 		return bytesRead;
 	}) {}
 #endif
@@ -928,7 +955,7 @@ public:
 	IDeflateArchive(std::span<const uint8_t> data) : input([data] (std::span<uint8_t> batch) mutable {
 		int copying = std::min(batch.size(), data.size());
 		if (copying == 0) {
-			throw std::runtime_error("Truncated input");
+			return 0;
 		}
 		memcpy(batch.data(), data.data(), copying);
 		data = std::span<const uint8_t>(data.begin() + copying, data.end());
