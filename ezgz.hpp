@@ -5,6 +5,7 @@
 #include <cstring>
 #include <span>
 #include <charconv>
+#include <bit>
 #include <vector>
 #include <numeric>
 #include <optional>
@@ -402,6 +403,103 @@ public:
 		int distance = distanceOffsets[partOfDistance - 1] + moreBits;
 		return distance;
 	}
+};
+
+constexpr int maximumCopyLength = 258;
+
+template <StreamSettings Settings>
+class DeduplicatedStream {
+	std::array<int16_t, Settings::maxSize> deduplicated = {};
+	int position = 0;
+
+public:
+	struct Section {
+		int position = 0; // public
+
+		Section(std::span<const int16_t> section) : section(section) {}
+
+		template <typename OnDuplication> // Three arguments, copy length - 1, distance word (range between -1 and -30), distance length - 1
+		int16_t readWord(const OnDuplication& onDuplication) {
+			int16_t word = section[position];
+			if (word >= 257) {
+				onDuplication(-section[position + 1], section[position + 2], -section[position + 3]);
+				position += 4;
+			} else {
+				position++;
+			}
+			return word;
+		}
+
+		bool atEnd() const {
+			return position == std::ssize(section);
+		}
+
+	private:
+		std::span<const int16_t> section = {};
+	};
+
+private:
+	std::function<int(Section, bool lastCall)> submit = {};
+
+	void add(int16_t value) {
+		deduplicated[position] = value;
+		position++;
+	}
+
+	void ensureSize(int size) {
+		if (position + size > std::ssize(deduplicated)) [[unlikely]] {
+			int consumed = submit(Section(std::span<const int16_t>(deduplicated.begin(), deduplicated.begin() + position)), false);
+			memmove(deduplicated.data(), deduplicated.data() + consumed, (position - consumed) * sizeof(int16_t));
+			position -= consumed;
+		}
+	}
+
+public:
+	DeduplicatedStream(std::function<int(Section, bool lastCall)> submit) : submit(std::move(submit)) {}
+	~DeduplicatedStream() {
+		if (position > 0) [[likely]] {
+			submit(Section(std::span<const int16_t>(deduplicated.begin(), deduplicated.begin() + position)), true);
+		}
+	}
+
+	void addByte(uint8_t value) {
+		ensureSize(1);
+		add(value);
+	}
+
+	void addDuplication(int length, int distance) {
+		ensureSize(4);
+
+		if (length <= 10) {
+			add(254 + length);
+			add(-1);
+		} else if (length == maximumCopyLength) {
+			add(288);
+			add(-1);
+		} else {
+			unsigned int modifiedLength = length - 3;
+			int width = std::bit_width(uint32_t(modifiedLength));
+			int suffixWidth = width - 3;
+			int prefix = modifiedLength >> suffixWidth;
+			int code = 257 + prefix + (suffixWidth << 2);
+			add(code);
+			add(-modifiedLength);
+		}
+
+		if (distance <= 4) {
+			add(-distance);
+			add(-1);
+		} else {
+			unsigned int modifiedDistance = distance - 1;
+			int width = std::bit_width(modifiedDistance);
+			int suffixWidth = width - 2;
+			int prefix = modifiedDistance >> suffixWidth;
+			int code = prefix + (suffixWidth << 1);
+			add(-code - 1);
+			add(-modifiedDistance);
+		}
+	}
+
 };
 
 // Handles output of decompressed data, filling bytes from past bytes and chunking. Consume needs to be called to empty it

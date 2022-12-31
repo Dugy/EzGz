@@ -13,11 +13,14 @@ struct SettingsWithInputSize : EzGz::DefaultDecompressionSettings {
 };
 
 template <int MaxSize, int MinSize>
+struct TestStreamSettings {
+	constexpr static int maxSize = MaxSize;
+	constexpr static int minSize = MinSize;
+};
+
+template <int MaxSize, int MinSize>
 struct SettingsWithOutputSize : EzGz::DefaultDecompressionSettings {
-	struct Output {
-		constexpr static int maxSize = MaxSize;
-		constexpr static int minSize = MinSize;
-	};
+	using Output = TestStreamSettings<MaxSize, MinSize>;
 };
 
 template <int MaxSize, int MinSize = 0, int LookAheadSize = sizeof(uint32_t)>
@@ -230,6 +233,91 @@ int main(int, char**) {
 		doATest(range2[1], 'g');
 		doATest(range2[2], 'r');
 		doATest(range2.size(), 3u);
+	}
+
+	{
+		std::cout << "Testing DeduplicatedStream" << std::endl;
+		int duplicationsFound = 0;
+		auto checker = [&, step = 0] (Detail::DeduplicatedStream<TestStreamSettings<6, 2>>::Section section, bool isLast) mutable -> int {
+			auto shouldntFindDup = [&] (int, int, int) {doATest("IsDuplication", "Shouldn't be duplication"); };
+			do {
+				if (step == 0) doATest(section.readWord(shouldntFindDup), 'a');
+				else if (step == 1) doATest(section.readWord(shouldntFindDup), 'b');
+				else if (step == 2) doATest(section.readWord(shouldntFindDup), 'c');
+				else if (step == 3) doATest(section.readWord([&] (int, int distanceWord, int) {
+					doATest(distanceWord, -2);
+					duplicationsFound++;
+				}), 257);
+				else if (step == 4) doATest(section.readWord(shouldntFindDup), 'd');
+				else if (step == 5) doATest(section.readWord([&] (int, int distanceWord, int) {
+					doATest(distanceWord, -3);
+					duplicationsFound++;
+				}), 258);
+				else if (step == 6)
+					break;
+				step++;
+			} while (isLast || section.position < 2);
+			return section.position;
+		};
+		{
+			Detail::DeduplicatedStream<TestStreamSettings<6, 2>> stream(checker);
+			stream.addByte('a');
+			stream.addByte('b');
+			stream.addByte('c');
+			stream.addDuplication(3, 2);
+			stream.addByte('d');
+			stream.addDuplication(4, 3);
+		}
+		doATest(duplicationsFound, 2);
+	}
+
+	{
+		std::cout << "Testing DeduplicatedStream 2" << std::endl;
+		int duplicationsFound = 0;
+		auto checker = [&, step = 0] (Detail::DeduplicatedStream<TestStreamSettings<10, 4>>::Section section, bool) mutable -> int {
+			while (!section.atEnd()) {
+				if (step == 0) doATest(section.readWord([&] (int, int distanceWord, int) {
+					doATest(distanceWord, -3);
+					duplicationsFound++;
+				}), 263);
+				else if (step == 1) doATest(section.readWord([&] (int length, int distanceWord, int distance) {
+					doATest(length, 9);
+					doATest(distanceWord, -6);
+					doATest(distance, 7);
+					duplicationsFound++;
+				}), 265);
+				else if (step == 2) doATest(section.readWord([&] (int length, int distanceWord, int distance) {
+					doATest(length, 21);
+					doATest(distanceWord, -9);
+					doATest(distance, 18);
+					duplicationsFound++;
+				}), 270);
+				else if (step == 3) doATest(section.readWord([&] (int length, int distanceWord, int distance) {
+					doATest(length, 102);
+					doATest(distanceWord, -23);
+					doATest(distance, 2304);
+					duplicationsFound++;
+				}), 279);
+				else if (step == 4) doATest(section.readWord([&] (int, int distanceWord, int distance) {
+					doATest(distanceWord, -30);
+					doATest(distance, 32767);
+					duplicationsFound++;
+				}), 285);
+				else if (step == 5)
+					break;
+				step++;
+			}
+			return section.position;
+		};
+		{
+			Detail::DeduplicatedStream<TestStreamSettings<10, 4>> stream(checker);
+			stream.addDuplication(9, 3);
+			stream.addDuplication(12, 8);
+			stream.addDuplication(24, 19);
+			stream.addDuplication(105, 2305);
+			stream.addDuplication(285, 32768);
+		}
+		doATest(duplicationsFound, 5);
 	}
 
 	{
