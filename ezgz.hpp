@@ -203,13 +203,14 @@ private:
 };
 
 static constexpr std::array<uint8_t, 19> codeCodingReorder = {16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15};
+static constexpr std::array<uint8_t, 19> codeCodingReorderInverse = {3, 17, 15, 13, 11, 9, 7, 5, 4, 6, 8, 10, 12, 14, 16, 18, 0, 1, 2};
 
 static constexpr std::array<uint8_t, 256> reversedBytes = ArrayFiller([] (int uninverted) constexpr {
 	return uint8_t((uninverted * uint64_t(0x0202020202) & uint64_t(0x010884422010)) % 0x3ff); // Reverse a byte
 });
 
 // Provides access to input stream as chunks of contiguous data
-template <StreamSettings Settings, typename Checksum>
+template <InputStreamSettings Settings, typename Checksum>
 class ByteInput {
 	static_assert(Settings::minSize < Settings::maxSize);
 	std::array<uint8_t, Settings::maxSize + Settings::lookAheadSize> buffer = {};
@@ -249,14 +250,19 @@ public:
 	ByteInput(std::function<int(std::span<uint8_t> batch)> readMoreFunction) : readMore(readMoreFunction) {}
 
 	// Note: May not get as many bytes as necessary, would need to be called multiple times
-	std::span<const uint8_t> getRange(int size) {
+	template <typename ByteType = uint8_t>
+	std::span<const ByteType> getRange(int size) {
 		if (position + size + lookAheadSize > filled) {
 			refillSome();
 		}
 		ptrdiff_t start = position;
 		int available = std::min<int>(size, filled - start);
 		position += available;
-		return {buffer.begin() + start, buffer.begin() + start + available};
+		return {reinterpret_cast<const ByteType*>(buffer.data()) + start, size_t(available)};
+	}
+
+	bool hasMoreDataInBuffer() const {
+		return position < filled;
 	}
 
 	uint64_t getBytes(int amount) {
@@ -280,11 +286,25 @@ public:
 	int getPosition() const {
 		return position;
 	}
+	void advancePosition(int by = 1) {
+		position += by;
+	}
 	ptrdiff_t getPositionStart() const {
 		return positionStart;
 	}
 	uint8_t getAtPosition(int index) const {
 		return buffer[index];
+	}
+	uint64_t getEightBytesFromCurrentPosition() {
+		ensureSize(1);
+		uint64_t got = getEightBytesAtPosition(position);
+		position++;
+		return got;
+	}
+	uint64_t getEightBytesAtPosition(int index) const {
+		uint64_t obtained = 0;
+		memcpy(&obtained, buffer.data() + index, sizeof(uint64_t));
+		return obtained;
 	}
 	int availableAhead() const {
 		return filled - position;
@@ -294,11 +314,19 @@ public:
 	auto encodedTable(int realSize, const std::array<uint8_t, 256>& codeCodingLookup, const std::array<uint8_t, codeCodingReorder.size()>& codeCodingLengths);
 };
 
+constexpr static std::array<int, 29> lengthOffsets = {3, 4, 4, 5, 7, 8, 9, 10, 11, 13, 15,
+		7, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258};
+constexpr static std::array<int, 30> distanceOffsets = {1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33,
+		49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577};
+
 template <typename T>
 concept ByteReader = requires(T reader) {
 	reader.returnBytes(1);
 	std::span<const uint8_t>(reader.getRange(6));
 };
+
+static constexpr std::array<uint16_t, 17> upperRemovals = {0x0000, 0x0001, 0x0003, 0x0007, 0x000f, 0x001f, 0x003f, 0x007f, 0x00ff,
+		0x01ff, 0x03ff, 0x07ff, 0x0fff, 0x1fff, 0x3fff, 0x7fff, 0xffff};
 
 // Provides optimised access to data from a ByteInput by bits
 template <ByteReader ByteInputType>
@@ -327,9 +355,6 @@ class BitReader {
 			bitsLeft += (added.size() << 3);
 		}
 	}
-
-	static constexpr std::array<uint16_t, 17> upperRemovals = {0x0000, 0x0001, 0x0003, 0x0007, 0x000f, 0x001f, 0x003f, 0x007f, 0x00ff,
-			0x01ff, 0x03ff, 0x07ff, 0x0fff, 0x1fff, 0x3fff, 0x7fff, 0xffff};
 
 public:
 
@@ -398,8 +423,6 @@ public:
 	int parseLongerDistance(int partOfDistance) {
 		int readMore = (partOfDistance - 3) >> 1;
 		auto moreBits = getBits(readMore);
-		constexpr static std::array<int, 30> distanceOffsets = {1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33,
-				49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577};
 		int distance = distanceOffsets[partOfDistance - 1] + moreBits;
 		return distance;
 	}
@@ -415,14 +438,27 @@ class DeduplicatedStream {
 public:
 	struct Section {
 		int position = 0; // public
+		constexpr static std::array<int, 29> lengthLengthArray = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0};
+		inline static const int* lengthLength = lengthLengthArray.data() - 257; // Accessing other words than copy words is undefined behaviour
+
+		constexpr static std::array<int, 30> distanceLengthArray = {13, 13, 12, 12, 11, 11, 10, 10, 9, 9, 8, 8, 7, 7, 6, 6, 5, 5, 4, 4, 3, 3, 2, 2, 1, 1, 0, 0, 0, 0};
+		inline static const int* distanceLength = distanceLengthArray.data() + distanceLengthArray.size(); // Accessing other indexes than between -30 and -1 is UB
 
 		Section(std::span<const int16_t> section) : section(section) {}
+
+		struct CodeRemainderWithLength {
+			int remainder = 0;
+			int length = 0;
+		};
 
 		template <typename OnDuplication> // Three arguments, copy length - 1, distance word (range between -1 and -30), distance length - 1
 		int16_t readWord(const OnDuplication& onDuplication) {
 			int16_t word = section[position];
 			if (word >= 257) {
-				onDuplication(-section[position + 1], section[position + 2], -section[position + 3]);
+				CodeRemainderWithLength lengthRemainder{ (-section[position + 1] & upperRemovals[lengthLength[word]]), lengthLength[word] };
+				int distanceWord = section[position + 2];
+				CodeRemainderWithLength distanceRemainder{ (-section[position + 3] & upperRemovals[distanceLength[distanceWord]]), distanceLength[distanceWord] };
+				onDuplication(lengthRemainder, section[position + 2], distanceRemainder);
 				position += 4;
 			} else {
 				position++;
@@ -448,7 +484,8 @@ private:
 
 	void ensureSize(int size) {
 		if (position + size > std::ssize(deduplicated)) [[unlikely]] {
-			int consumed = submit(Section(std::span<const int16_t>(deduplicated.begin(), deduplicated.begin() + position)), false);
+			Section section(std::span<const int16_t>(deduplicated.begin(), deduplicated.begin() + position));
+			int consumed = submit(section, false);
 			memmove(deduplicated.data(), deduplicated.data() + consumed, (position - consumed) * sizeof(int16_t));
 			position -= consumed;
 		}
@@ -458,7 +495,8 @@ public:
 	DeduplicatedStream(std::function<int(Section, bool lastCall)> submit) : submit(std::move(submit)) {}
 	~DeduplicatedStream() {
 		if (position > 0) [[likely]] {
-			submit(Section(std::span<const int16_t>(deduplicated.begin(), deduplicated.begin() + position)), true);
+			Section section(std::span<const int16_t>(deduplicated.begin(), deduplicated.begin() + position));
+			submit(section, true);
 		}
 	}
 
@@ -474,7 +512,7 @@ public:
 			add(254 + length);
 			add(-1);
 		} else if (length == maximumCopyLength) {
-			add(288);
+			add(285);
 			add(-1);
 		} else {
 			unsigned int modifiedLength = length - 3;
@@ -554,6 +592,7 @@ public:
 
 	void addByte(char byte) {
 		checkSize();
+//		std::cout << "Adding byte " << byte << std::endl;
 		buffer[used] = byte;
 		used++;
 	}
@@ -572,6 +611,7 @@ public:
 				throw std::runtime_error("Looking back too many bytes, corrupted archive or insufficient buffer size");
 			}
 			int toWrite = std::min(distance, length - written);
+//			std::cout << "Repeating sequence " << std::string_view(buffer.data() + used - distance, toWrite) << std::endl;
 			memmove(buffer.data() + used, buffer.data() + used - distance, toWrite);
 			used += toWrite;
 			written += toWrite;
@@ -584,6 +624,55 @@ public:
 
 	void done() { // Called when the whole buffer can be consumed because the data won't be needed anymore
 		expectsMore = false;
+	}
+};
+
+template <StreamSettings Settings, typename Checksum>
+class BitOutput {
+	uint64_t data = 0;
+	int filled = 0;
+	ByteOutput<Settings, Checksum>& output;
+
+	void doEmpty(int bytes) {
+		const char* dataAsBytes = reinterpret_cast<char*>(&data);
+		if constexpr (std::endian::native == std::endian::little)
+			output.addBytes(std::span<const char>(dataAsBytes, bytes));
+		else {
+			std::array<char, 8> invertedBytes = {};
+			for (int i = 0; i < bytes; i++) {
+				invertedBytes[bytes - i] = dataAsBytes[i];
+				output.addBytes(std::span<const char>(invertedBytes.data(), bytes));
+			}
+		}
+	}
+
+	void emptyIfNeeded() {
+		if (filled > 48) [[unlikely]] { // Will always keep space for 16 bits
+			int removingBytes = filled / 8; // Rounded down
+			doEmpty(removingBytes);
+			int removingBits = removingBytes * 8;
+			data >>= removingBits;
+			filled -= removingBits;
+		}
+	}
+
+public:
+	BitOutput(ByteOutput<Settings, Checksum>& output) : output(output) {}
+
+	~BitOutput() {
+		doEmpty((filled + 7) / 8); // Round up before dividing by 8
+	}
+
+	void addBits(uint64_t value, int size) { // More than 16 bits is actually not supported (there is no use case for more)
+		data += value << filled;
+		filled += size;
+		emptyIfNeeded();
+	}
+
+	void addBitsAndCrop(uint64_t value, int size) { // More than 16 bits is actually not supported (there is no use case for more)
+		data += (value & upperRemovals[size]) << filled;
+		filled += size;
+		emptyIfNeeded();
 	}
 };
 
@@ -619,11 +708,13 @@ public:
 		for (int i = 0; i < realSize; ) {
 			int length = 0;
 			reader.peekAByteAndConsumeSome([&] (uint8_t peeked) {
+//				std::cout << "Peeked " << int(peeked) << std::endl;
 				length = codeCodingLookup[peeked];
 				return codeCodingLengths[length];
 			});
 			if (length < 16) {
 				codes[i].length = length;
+//				std::cout << "Element " << i << " has size " << length << std::endl;
 				i++;
 				quantities[length]++;
 			} else if (length == 16) {
@@ -632,6 +723,7 @@ public:
 				int copy = reader.getBits(2) + 3;
 				for (int j = i; j < i + copy; j++) {
 					codes[j].length = codes[i - 1].length;
+//					std::cout << "Element " << j << " has size " << int(codes[j].length) << std::endl;
 				}
 				quantities[codes[i - 1].length] += copy;
 				i += copy;
@@ -745,11 +837,91 @@ public:
 	}
 };
 
-template <StreamSettings Settings, typename Checksum>
+template <InputStreamSettings Settings, typename Checksum>
 template <int MaxTableSize>
 auto ByteInput<Settings, Checksum>::encodedTable(int realSize, const std::array<uint8_t, 256>& codeCodingLookup, const std::array<uint8_t, codeCodingReorder.size()>& codeCodingLengths) {
 	return EncodedTable<MaxTableSize, ByteInput<Settings, Checksum>>(*this, realSize, codeCodingLookup, codeCodingLengths);
 }
+
+template <InputStreamSettings InputSettings, typename Checksum, StreamSettings DeduplicatedSettings, int ChunkSize = 30000, int IndexLength = 31237, int IndexCount = 6, typename IndexType = uint16_t>
+class Deduplicator {
+
+	struct LookbackIndex {
+		std::array<IndexType, IndexLength> positions = {};
+		uint64_t mask = 0;
+
+		void moveBack(int offset) {
+			for (IndexType& position : positions) {
+				position -= offset;
+			}
+		}
+	};
+	std::array<LookbackIndex, IndexCount> lookbackIndexes = ArrayFiller([] (int index) {
+		if constexpr (std::endian::native == std::endian::little)
+			return LookbackIndex{{}, 0xffffffffffffffff >> ((5 - index) * 8)};
+		else
+			return LookbackIndex{{}, 0xffffffffffffffff << ((5 - index) * 8)};
+	});
+	static_assert(IndexCount <= 6, "We can't have longer indexes than 8 bytes with uint64_t as pseudohash");
+
+	int positionStart = 0;
+
+	ByteInput<InputSettings, Checksum>& input;
+	DeduplicatedStream<DeduplicatedSettings>& output;
+
+public:
+	Deduplicator(ByteInput<InputSettings, Checksum>& input, DeduplicatedStream<DeduplicatedSettings>& output) : input(input), output(output) {}
+
+	void deduplicateSome() {
+		do {
+			uint64_t sequence = input.getEightBytesFromCurrentPosition();
+			// Shift positions int the map to the new offset
+			if (input.getPositionStart() != positionStart) [[unlikely]] {
+				int newStart = input.getPositionStart();
+				int shift = newStart - positionStart;
+				for (auto& index : lookbackIndexes)
+					index.moveBack(shift);
+				positionStart = newStart;
+			}
+			int position = input.getPosition() - 1;
+			IndexType location = 0;
+			int matchLength = 0;
+			for (int index = IndexCount - 1; index >= 0; index--) {
+				uint64_t trimmedSequence = sequence & lookbackIndexes[index].mask;
+				int sequenceHash = trimmedSequence % IndexLength;
+				location = lookbackIndexes[index].positions[sequenceHash];
+				if (location >= position) { // Clearly bad data
+					continue;
+				}
+				uint64_t there = input.getEightBytesAtPosition(location);
+				there &= lookbackIndexes[index].mask;
+				if (there == trimmedSequence) {
+					for (matchLength = index + 3; matchLength < maximumCopyLength; matchLength++) { // TODO: Don't go past end
+						if (input.getAtPosition(location + matchLength) != input.getAtPosition(position + matchLength)) {
+							goto matchOver; // Break from two loops
+						}
+					}
+					break;
+				}
+				lookbackIndexes[index].positions[sequenceHash] = position;
+			}
+			matchOver:; // For breaking from double loop
+			matchLength = std::min(matchLength, input.availableAhead());
+			if (matchLength >= 3) {
+				std::string copied;
+				for (int i = 0; i < matchLength; i++) {
+					copied += input.getAtPosition(location + i);
+				}
+//				std::cout << "Adding " << copied << std::endl;
+				output.addDuplication(matchLength, position - location);
+				input.advancePosition(matchLength - 1);
+			} else {
+//				std::cout << "Adding " << char(input.getAtPosition(position)) << std::endl;
+				output.addByte(input.getAtPosition(position));
+			}
+		} while (input.hasMoreDataInBuffer());
+	}
+};
 
 // Higher level class handling the overall state of parsing. Implemented as a state machine to allow pausing when output is full.
 template <DecompressionSettings Settings>
@@ -768,6 +940,7 @@ class DeflateReader {
 			return (copyLength == 0);
 		}
 		bool copy(decltype(DeflateReader::output)& output, int length, int distance) {
+//			std::cout << "Copying " << length << " bytes from " << distance << " behind" << std::endl;
 			copyLength = length;
 			copyDistance = distance;
 			return restart(output);
@@ -888,6 +1061,7 @@ class DeflateReader {
 				int word = codes.readWord();
 
 				if (word < 256) {
+//					std::cout << "Found letter " << word << std::endl;
 					parent->output.addByte(word);
 				} else if (word == 256) [[unlikely]] {
 					break;
@@ -900,6 +1074,7 @@ class DeflateReader {
 					if (distance > 4) {
 						distance = input.parseLongerDistance(distance);
 					}
+//					std::cout << "Copying " << length << " bytes from " << distance << " behind" << std::endl;
 					CopyState::copy(parent->output, length, distance);
 				}
 			}
@@ -993,6 +1168,380 @@ public:
 				throw std::runtime_error("Unknown type of block compression");
 			}
 		}
+	}
+};
+
+template <StreamSettings OutputSettings, StreamSettings DeduplicatedSettings>
+class HuffmanWriter {
+	ByteOutput<OutputSettings, NoChecksum>& byteOutput;
+	std::optional<BitOutput<OutputSettings, NoChecksum>> bitOutput;
+
+	template <int Size>
+	struct HuffmanTable {
+		struct Entry {
+			uint16_t code;
+			uint8_t length;
+
+			Entry() = default;
+			Entry(uint16_t codeUnreversed, uint8_t length) : length(length) {
+				if (length <= 8) {
+					code = reversedBytes[codeUnreversed] >> (8 - length);
+				} else {
+					code = (reversedBytes[codeUnreversed >> 8] >> (16 - length)) | (reversedBytes[codeUnreversed & 0xff] << (length - 8));
+				}
+			}
+		};
+		std::array<Entry, Size> codes = {};
+		int length = 0;
+
+		HuffmanTable() = default;
+		struct UseDefaultLengthEncoding {};
+		constexpr HuffmanTable(UseDefaultLengthEncoding) : codes(ArrayFiller([] (int index) {
+			if (index <= 143) {
+				return Entry(uint16_t(index + 0b00110000), 8);
+			} else if (index <= 255) {
+				return Entry(uint16_t(index - 144 + 0b110010000), 9);
+			} else if (index == 256) {
+				return Entry(0, 7);
+			} else if (index < 279) {
+				return Entry(uint16_t(index - 256), 7);
+			} else {
+				return Entry(uint16_t(index - 280 + 0b11000000), 8);
+			}
+		})) {}
+		struct UseDefaultDistanceEncoding {};
+		constexpr HuffmanTable(UseDefaultDistanceEncoding) : codes(ArrayFiller([] (int index) {
+			return Entry(29 - index, 5);
+		})) {}
+
+
+		template <typename Applied>
+		void runThroughCodeEncoding(int endAt, int increment, const Applied& applied) const {
+			int previousLength = 0;
+			int previousLengthRepeats = 0;
+			auto doneRepeating = [&] {
+//				std::cout << "We have length " << previousLength << " after occurring " << previousLengthRepeats << " times" << std::endl;
+				bool repeatAgain = false;
+				do {
+					repeatAgain = false;
+					if (previousLengthRepeats == 1) {
+//						std::cout << "Printing " << previousLength << " once" << std::endl;
+						applied(previousLength, 0);
+					} else if (previousLengthRepeats == 2) {
+//						std::cout << "Printing " << previousLength << " twice" << std::endl;
+						applied(previousLength, 0);
+						applied(previousLength, 0);
+					} else {
+						// Note: not the most efficient, it may end with having to repeat the previous value up to 2 times at the end
+						if (previousLength == 0) {
+							if (previousLengthRepeats > 10) {
+								applied(18, std::min(previousLengthRepeats, 138));
+//								std::cout << "Printing large batch of " << std::min(previousLengthRepeats, 138) << " zeroes" << std::endl;
+								previousLengthRepeats = std::max(0, previousLengthRepeats - 138);
+								if (previousLengthRepeats > 0) {
+									repeatAgain = true;
+								}
+							} else {
+								applied(17, previousLengthRepeats);
+//								std::cout << "Printing small batch of " << previousLengthRepeats << " zeroes" << std::endl;
+								previousLengthRepeats = 0;
+							}
+						} else {
+//							std::cout << "Printing " << previousLength << " once" << std::endl;
+							applied(previousLength, 0);
+							previousLengthRepeats--;
+							while (previousLengthRepeats > 0) {
+								if (previousLengthRepeats < 3) {
+//									std::cout << "Printing " << previousLength << " " << previousLengthRepeats << " times" << std::endl;
+									for (int i = 0; i < previousLengthRepeats; i++)
+										applied(previousLength, 0);
+									break;
+								} else {
+//									std::cout << "Bulk printing " << previousLength << " " << previousLengthRepeats << " times" << std::endl;
+									applied(16, std::min(6, previousLengthRepeats));
+									previousLengthRepeats = std::max(0, previousLengthRepeats - 6);
+								}
+							}
+						}
+					}
+				} while (repeatAgain);
+			};
+			auto checkOne = [&] (Entry code) {
+				if (code.length == previousLength) {
+					previousLengthRepeats++;
+				} else {
+					if (previousLengthRepeats > 0) [[likely]] { // Startup
+						doneRepeating();
+					}
+					previousLength = code.length;
+					previousLengthRepeats = 1;
+				}
+			};
+			if (increment > 0) {
+				for (int i = 0; i < endAt; i += increment) {
+					checkOne(codes[i]);
+				}
+			} else {
+				for (int i = Size - 1; i >= endAt; i += increment) {
+					checkOne(codes[i]);
+				}
+			}
+			doneRepeating();
+		}
+	};
+
+	template <int Size>
+	struct FrequencyCounts {
+		struct Entry {
+			int index = 0;
+			int count = 0;
+			int length = 0;
+		};
+
+		std::array<Entry, Size> counts = ArrayFiller([] (int index) { return Entry{ index, 0 }; });
+
+		HuffmanTable<Size> generateEncoding(int left, bool ascending) { // Trying to do this without the bool flag will bloat the code a lot
+			std::array<Entry, Size> sortedCounts = counts;
+			std::sort(sortedCounts.begin(), sortedCounts.end(), [] (Entry first, Entry second) {
+				return first.count > second.count;
+			});
+			HuffmanTable<Size> made = {};
+			if (left == 0) { // Empty table is not permitted
+				sortedCounts[0].count = 1;
+				left = 1;
+			}
+
+			int sizeIncrement = 1;
+			int capacity = 0x10000;
+
+			// Assign lengths, assign as much capacity as possible but not more than the word's proportion in the total number of words
+			for (Entry& word : sortedCounts) {
+				if (word.count == 0) break; // In this case, we're done sooner
+				while (int(0x10000 >> sizeIncrement) * left > word.count * capacity) {
+					// Switch to longer codes
+					sizeIncrement++;
+				}
+				word.length = sizeIncrement;
+				left -= word.count;
+				capacity -= (0x10000 >> sizeIncrement);
+			}
+
+			// Assign leftover capacity to the shortest lengths that can be shortened by taking this capacity
+			int sameLengthRangeBegin = 0;
+			int sameLengthRangeEnd = 0;
+			uint16_t currentCode = 0;
+			auto sortLastLength = [&] () {
+				// Ensure codes of the same length start from the lowest index code
+				if (ascending) {
+					std::sort(sortedCounts.begin() + sameLengthRangeBegin, sortedCounts.begin() + sameLengthRangeEnd,
+							  [] (Entry first, Entry second) {
+						return first.index < second.index;
+					});
+				} else {
+					std::sort(sortedCounts.begin() + sameLengthRangeBegin, sortedCounts.begin() + sameLengthRangeEnd,
+							  [] (Entry first, Entry second) {
+						return first.index > second.index;
+					});
+				}
+				for (int i = sameLengthRangeBegin; i < sameLengthRangeEnd; i++) {
+					made.codes[sortedCounts[i].index] = typename HuffmanTable<Size>::Entry(currentCode, sortedCounts[i].length);
+					made.length += sortedCounts[i].count * sortedCounts[i].length;
+					//std::cout << "Code for " << word.index << " is now " << made.codes[word.index].code << " with length " << int(made.codes[word.index].length) << " from current code " << currentCode << std::endl;
+					currentCode += 1;
+				}
+				sameLengthRangeBegin = sameLengthRangeEnd;
+			};
+			int previousLength = sortedCounts.front().length;
+			for (Entry& word : sortedCounts) {
+				if (word.count == 0) break; // In this case, we're done sooner
+				int neededToUpgrade = 0x10000 >> word.length;
+				if (neededToUpgrade <= capacity) {
+					capacity -= neededToUpgrade;
+					word.length--;
+				}
+				if (word.length != previousLength) {
+					sortLastLength();
+					currentCode <<= (word.length) - previousLength;
+					previousLength = word.length;
+				}
+				sameLengthRangeEnd++;
+			}
+			sortLastLength();
+
+			if (capacity > 0) { // This is not only suboptimal, gunzip requires every Huffman code to be valid (the standard does not)
+				throw std::logic_error("Didn't use all capacity available for Huffman coding");
+			}
+
+			return made;
+		}
+
+		int sizeWithEncoding(const HuffmanTable<Size>& encoding) {
+			int total = 0;
+			for (Entry letter : counts) {
+				total += letter.count * encoding.codes[letter.index];
+			}
+			return total;
+		}
+
+		template <int OtherSize>
+		int addToHuffmanTableLengths(HuffmanTable<OtherSize>& encoding, int endAt, int increment) {
+			int totalWords = 0;
+			encoding.runThroughCodeEncoding(endAt, increment, [this, &totalWords] (int word, int) {
+				counts[word].count++;
+				totalWords++;
+			});
+			return totalWords;
+		}
+	};
+
+	template <int OtherSize>
+	void encodeCode(const HuffmanTable<19>& encoding, const HuffmanTable<OtherSize>& code, int endAt, int increment) {
+		code.runThroughCodeEncoding(endAt, increment, [this, &encoding] (int word, int extra) {
+//			std::cout << "Adding " << int(encoding.codes[word].length) << " bits of code " << encoding.codes[word].code << std::endl;
+			bitOutput->addBits(encoding.codes[word].code, encoding.codes[word].length);
+			if (word == 16) {
+				bitOutput->addBits(extra - 3, 2);
+			} else if (word == 17) {
+				bitOutput->addBits(extra - 3, 3);
+//				std::cout << "...followed by 3 bits of " << extra - 3 << std::endl;
+			} else if (word == 18) {
+				bitOutput->addBits(extra - 11, 7);
+//				std::cout << "...followed by 7 bits of " << extra - 11 << std::endl;
+			}
+		});
+	}
+
+public:
+	HuffmanWriter(ByteOutput<OutputSettings, NoChecksum>& output) : byteOutput(output) {}
+
+	~HuffmanWriter() {
+		bitOutput.reset();
+	}
+
+	void writeBatch(typename DeduplicatedStream<DeduplicatedSettings>::Section section, bool isLast) {
+		// Baseline, dynamic Hufffman coding won't be used if it's better; TODO: Why not constexpr?
+		static HuffmanTable<286> staticWordEncoding = HuffmanTable<286>(typename HuffmanTable<286>::UseDefaultLengthEncoding());
+		static HuffmanTable<30> staticDistanceEncoding = HuffmanTable<30>(typename HuffmanTable<30>::UseDefaultDistanceEncoding());
+		// Avoid having to convert the oddly positioned distance codes in the range of -30 to -1
+		static typename HuffmanTable<30>::Entry* staticDistanceZero = staticDistanceEncoding.codes.data() + 30;
+		int staticLength = 0;
+
+		// Find the distribution of words
+		FrequencyCounts<286> wordCounts = {};
+		FrequencyCounts<30> distanceCounts = {};
+		typename FrequencyCounts<30>::Entry* frequencyDistanceZero = distanceCounts.counts.data() + 30;
+		int words = 0;
+		int distances = 0;
+		while (!section.atEnd()) {
+			int word = section.readWord([&] (auto, int distanceWord, auto) {
+				frequencyDistanceZero[distanceWord].count++;
+				staticLength += staticDistanceZero[distanceWord].length;
+				distances++;
+			});
+			wordCounts.counts[word].count++;
+			staticLength += staticWordEncoding.codes[word].length;
+			words++;
+		}
+		wordCounts.counts[256].count++; // We need to end the block somewhere
+
+		// We'll need to stop writing lengths from some point
+		int lengthsAfter256 = 1;
+		for (int i = std::ssize(wordCounts.counts) - 1; i > 257; i--) {
+			if (wordCounts.counts[i].count != 0) {
+				lengthsAfter256 = i - 256;
+				break;
+			}
+		}
+		int lowestDistanceWord = 1;
+		for (int i = 1; i < std::ssize(distanceCounts.counts); i++) {
+			if (distanceCounts.counts[i].count != 0) {
+				lowestDistanceWord = i;
+				break;
+			}
+		}
+
+		// Generate necessary encodings
+		HuffmanTable<286> dynamicWordEncoding = wordCounts.generateEncoding(words + 1, true /*ascending*/);
+		HuffmanTable<30> dynamicDistanceEncoding = distanceCounts.generateEncoding(distances, false /*descending*/);
+
+		// Find distribution and generate encodings for the definition of the Huffman code
+		FrequencyCounts<19> codeCounts = {};
+		int totalCodes = 0;
+		totalCodes += codeCounts.addToHuffmanTableLengths(dynamicWordEncoding, 257 + lengthsAfter256, 1);
+		totalCodes += codeCounts.addToHuffmanTableLengths(dynamicDistanceEncoding, lowestDistanceWord, -1);
+		HuffmanTable<19> codeEncoding = codeCounts.generateEncoding(totalCodes, true /*ascending*/);
+
+		int codeCodingTableLength = 0;
+		for (int i = 0; i < std::ssize(codeCodingReorder); i++) {
+			if (codeEncoding.codes[i].length > 0) {
+				codeCodingTableLength = std::max<int>(codeCodingTableLength, codeCodingReorderInverse[i]);
+			}
+		}
+		codeCodingTableLength = std::max(codeCodingTableLength + 1, 4); // At least 4 codes must be written
+
+		// Now, we can estimate the size of the encoded part (minus the extra bits after some numbers because they're always the same)
+		int dynamicLength = 12 + codeCodingTableLength * 3; // Intro length
+		dynamicLength += codeEncoding.length; // Encoded codes
+		dynamicLength += 2 * codeCounts.counts[16].count + 3 * codeCounts.counts[17].count + 7 * codeCounts.counts[18].count; // Extra bits
+		dynamicLength += dynamicWordEncoding.length; // Encoded words
+		dynamicLength += dynamicDistanceEncoding.length; // Encoded distances
+
+		// Write the table for the case where the dynamic one is picked
+		if (!bitOutput) {
+			bitOutput.emplace(byteOutput);
+		}
+		bitOutput->addBits(isLast, 1);
+		if (dynamicLength < staticLength) {
+			// Intro
+			bitOutput->addBits(0b10, 2);
+			bitOutput->addBits(lengthsAfter256, 5);
+			bitOutput->addBits(29 - lowestDistanceWord, 5);
+			bitOutput->addBits(codeCodingTableLength - 4, 4);
+
+			// Code encoding
+			for (int i = 0; i < codeCodingTableLength; i++) {
+//				std::cout << "Writing " << int(codeEncoding.codes[codeCodingReorder[i]].length) << " for " << int(codeCodingReorder[i]) << std::endl;
+				bitOutput->addBits(codeEncoding.codes[codeCodingReorder[i]].length, 3); // Writing some bullshit here
+			}
+
+			// Code declaration
+			encodeCode(codeEncoding, dynamicWordEncoding, 257 + lengthsAfter256, 1);
+			encodeCode(codeEncoding, dynamicDistanceEncoding, lowestDistanceWord, -1);
+		} else {
+			bitOutput->addBits(0b01, 2);
+		}
+
+		// Pick the encoding
+		const HuffmanTable<286>& wordEncoding = (dynamicLength < staticLength) ? dynamicWordEncoding : staticWordEncoding;
+		const HuffmanTable<30>& distanceEncoding = (dynamicLength < staticLength) ? dynamicDistanceEncoding : staticDistanceEncoding;
+		const typename HuffmanTable<30>::Entry* distanceZero = distanceEncoding.codes.data() + 30;
+
+		// Encode the actual block
+		section.position = 0;
+		while (!section.atEnd()) {
+			bool alsoOthers = false;
+			typename decltype(section)::CodeRemainderWithLength length = {};
+			int distanceWord = 0;
+			typename decltype(section)::CodeRemainderWithLength distance = {};
+			int word = section.readWord([&] (auto lengthExtraAssigned, int distanceWordAssigned, auto distanceExtraAssigned) {
+				alsoOthers = true;
+				length = lengthExtraAssigned;
+				distanceWord = distanceWordAssigned;
+				distance = distanceExtraAssigned;
+			});
+			bitOutput->addBits(wordEncoding.codes[word].code, wordEncoding.codes[word].length);
+			if (alsoOthers) { // Hopefully this will be optimised out
+//				std::cout << "Copy " << word << " +(" << length.remainder << ": " << length.length << ") with distance " << (-1 - distanceWord) << " +(" << distance.remainder << " - " << distance.length << ")" << std::endl;
+				if (word >= 265) {
+					bitOutput->addBitsAndCrop(length.remainder, length.length);
+				}
+				bitOutput->addBits(distanceZero[distanceWord].code, distanceZero[distanceWord].length);
+				if (distanceWord < -4) {
+					bitOutput->addBitsAndCrop(distance.remainder, distance.length);
+				}
+			}
+		}
+		bitOutput->addBits(wordEncoding.codes[256].code, wordEncoding.codes[256].length); // Ending
 	}
 };
 
