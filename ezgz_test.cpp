@@ -731,9 +731,19 @@ int main(int, char**) {
 		}
 		output.done();
 		std::span<const char> obtained = output.consume();
+		// TODO: Assert the obtained part is shorter than if it was compressed using static compression
 		std::vector<char> decompressed = readDeflateIntoVector(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(obtained.data()), obtained.size()));
 		std::string_view decompressedStr(reinterpret_cast<const char*>(decompressed.data()), decompressed.size());
 		doATest(decompressedStr, "abaabbbabaababbaababaaaabaaabbbbbaa");
+	}
+
+	{
+		std::cout << "Testing Huffman compression together" << std::endl;
+		std::string_view text = "BAACCEACAAAEBAACEABAEDEACEAACAAECCAADAEAACAEADAA";
+		std::vector<uint8_t> compressed = writeDeflateIntoVector<SettingsWithInputSize<200, 35>::Input>(text);
+		std::vector<char> decompressed = readDeflateIntoVector(compressed);
+		std::string_view decompressedStr(reinterpret_cast<const char*>(decompressed.data()), decompressed.size());
+		doATest(decompressedStr, "BAACCEACAAAEBAACEABAEDEACEAACAAECCAADAEAACAEADAA");
 	}
 
 	{

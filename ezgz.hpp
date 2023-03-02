@@ -309,6 +309,9 @@ public:
 	int availableAhead() const {
 		return filled - position;
 	}
+	bool isAtEnd() {
+		return lookAheadSize == 0 && !availableAhead();
+	}
 
 	template <int MaxTableSize>
 	auto encodedTable(int realSize, const std::array<uint8_t, 256>& codeCodingLookup, const std::array<uint8_t, codeCodingReorder.size()>& codeCodingLengths);
@@ -558,6 +561,17 @@ class ByteOutput {
 public:
 	int available() {
 		return buffer.size() - used;
+	}
+
+	bool canConsume(const int bytesToKeep = 0) {
+		int wouldConsume = expectsMore ? consumed : used;
+		int wouldKeep = std::min(bytesToKeep, wouldConsume);
+		int wouldRemove = wouldConsume - wouldKeep;
+		int minimum = Settings::minSize - used + wouldConsume;
+		if (wouldKeep < minimum) {
+			wouldRemove = wouldConsume - wouldKeep;
+		}
+		return (wouldRemove > 0);
 	}
 
 	std::span<const char> consume(const int bytesToKeep = 0) {
@@ -1573,6 +1587,53 @@ std::vector<char> readDeflateIntoVector(std::span<const uint8_t> allData) {
 		return filling;
 	});
 }
+
+template <StreamSettings Settings, typename Checksum = NoChecksum>
+std::vector<uint8_t> writeDeflateIntoVector(std::function<int(std::span<char> batch)> readMoreFunction) {
+	std::vector<uint8_t> result;
+	{
+		Detail::ByteOutput<Settings, Checksum> output;
+		{
+			Detail::HuffmanWriter<Settings, Settings> writer(output);
+			auto connector = [&] (typename Detail::DeduplicatedStream<Settings>::Section section, bool lastCall) {
+				writer.writeBatch(section, lastCall);
+				return section.position;
+			};
+
+			{
+				Detail::ByteInput<Settings, Checksum> input([&readMoreFunction] (std::span<uint8_t> batch) {
+					return readMoreFunction(std::span<char>(reinterpret_cast<char*>(batch.data()), batch.size()));
+				});
+				Detail::DeduplicatedStream<Settings> deduplicated(connector);
+				Detail::Deduplicator<Settings, Checksum, Settings> deduplicator(input, deduplicated);
+
+				do {
+					deduplicator.deduplicateSome();
+					if (output.canConsume() > 0) {
+						std::span<const char> batch = output.consume();
+						result.insert(result.end(), batch.begin(), batch.end());
+					}
+				} while (!input.isAtEnd());
+			}
+		}
+		output.done();
+		std::span<const char> batch = output.consume();
+		result.insert(result.end(), batch.begin(), batch.end());
+	}
+	return result;
+}
+
+template <StreamSettings Settings, typename Checksum = NoChecksum>
+std::vector<uint8_t> writeDeflateIntoVector(std::span<const char> allData) {
+	return writeDeflateIntoVector<Settings, Checksum>([allData, position = 0] (std::span<char> toFill) mutable -> int {
+		int filling = std::min(allData.size() - position, toFill.size());
+		if(filling != 0)
+			memcpy(toFill.data(), &allData[position], filling);
+		position += filling;
+		return filling;
+	});
+}
+
 
 // Handles decompression of a deflate-compressed archive, no headers
 template <DecompressionSettings Settings = DefaultDecompressionSettings>
