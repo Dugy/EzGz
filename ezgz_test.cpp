@@ -763,7 +763,7 @@ int main(int, char**) {
 				0x00, 0x00, 0x00};
 		IGzFile file(data);
 
-		IGzFileInfo info = file.info();
+		GzFileInfo info = file.info();
 		doATest(int(info.operatingSystem), int(CreatingOperatingSystem::UNIX_BASED));
 		doATest(info.fastestCompression, false);
 		doATest(info.densestCompression, false);
@@ -805,6 +805,29 @@ int main(int, char**) {
 				doATest(line, linesExpected.at(i));
 			}
 		}
+	}
+
+	{
+		std::cout << "Testing Gz file writing" << std::endl;
+		std::vector<uint8_t> compressed = {};
+		std::function<void(std::span<const char> batch)> consumeFunction = [&] (std::span<const char> batch) {
+			compressed.insert(compressed.end(), batch.begin(), batch.end());
+		};
+		GzFileInfo<std::string> info = {"secret"};
+		OGzFile<SettingsWithInputSize<200, 35>::Input, std::string> compressor(info, consumeFunction);
+		compressor.writeSome(std::string_view("Hahahahahaha!\n"));
+		compressor.writeSome(std::string_view("Mwahahahahaha!"));
+		compressor.flush();
+		IGzFile reading(compressed);
+		reading.readByLines([&, count = 0] (std::span<const char> line) mutable {
+			std::string_view lineText = {line.data(), line.size()};
+			if (count == 0) {
+				doATest(lineText, "Hahahahahaha!");
+			} else if (count == 1) {
+				doATest(lineText, "Mwahahahahaha!");
+			} else doATest("Is here", "Shouldn't get here");
+			count++;
+		});
 	}
 
 	std::cout << "Passed: " << (tests - errors) << " / " << tests << ", errors: " << errors << std::endl;
