@@ -184,6 +184,15 @@ struct DefaultDecompressionSettings : MinDecompressionSettings {
 	constexpr static bool verifyChecksum = true;
 };
 
+struct DefaultCompressionSettings : EzGz::DefaultDecompressionSettings {
+	using Checksum = EzGz::NoChecksum;
+	struct Input : DefaultDecompressionSettings::Input {
+		constexpr static int maxSize = 30000;
+		constexpr static int minSize = 10000;
+		constexpr static int lookAheadSize = 300;
+	};
+};
+
 namespace Detail {
 
 template <typename Builder>
@@ -299,6 +308,11 @@ public:
 	}
 
 	int refillSome(const std::function<int(std::span<uint8_t> batch)>& readMoreFunction) {
+		int added = readMoreFunction(startFilling());
+		return doneFilling(added);
+	}
+
+	std::span<uint8_t> startFilling() {
 		if (position + lookAheadSize >= filled) {
 			int offset = std::max(0, position - Settings::minSize);
 			positionStart += offset;
@@ -306,7 +320,10 @@ public:
 			memmove(buffer.data(), buffer.data() + offset, filled);
 			position -= offset;
 		}
-		int added = readMoreFunction(std::span<uint8_t>(buffer.begin() + filled, buffer.end()));
+		return std::span<uint8_t>(buffer.begin() + filled, buffer.end());
+	}
+
+	int doneFilling(int added) {
 		crc(std::span<uint8_t>(reinterpret_cast<uint8_t*>(buffer.begin() + filled), added));
 		if (added == 0) {
 			lookAheadSize = 0;
@@ -1741,12 +1758,18 @@ public:
 
 template <StreamSettings Settings, typename Checksum = NoChecksum>
 class ODeflateArchive {
+protected:
 	Detail::ByteOutput<Settings, NoChecksum> output;
-	Detail::HuffmanWriter<Settings, Settings> writer = {output};
-	std::function<void(std::span<const char> batch)> consumeFunction;
 	Detail::ByteInput<Settings, Checksum> input = {[this] (std::span<uint8_t>) -> int {
 		return 0; // TODO: The input buffer should be able to renew from this
 	}};
+
+	void writeAtEnd(std::function<void()> trailerWriter) {
+		writeTrailer = trailerWriter;
+	}
+private:
+	Detail::HuffmanWriter<Settings, Settings> writer = {output};
+	std::function<void(std::span<const char> batch)> consumeFunction;
 	Detail::DeduplicatedStream<Settings> deduplicated = {[this] (typename Detail::DeduplicatedStream<Settings>::Section section, bool lastCall) {
 		writer.writeBatch(section, lastCall);
 		return section.position;
@@ -1760,12 +1783,14 @@ class ODeflateArchive {
 		}
 	}
 
+	std::function<void()> writeTrailer;
+
 public:
 	ODeflateArchive(std::function<void(std::span<const char> batch)> consumeFunction) : consumeFunction(std::move(consumeFunction)) { }
 
 #ifndef EZGZ_NO_FILE
 	// FIXME: We are saving output, not input!
-	ODeflateArchive(const std::string& fileName) : consumeFunction([file = std::make_shared<std::ofstream>(fileName, std::ios::binary)] (std::span<const char> batch) mutable {
+	ODeflateArchive(const std::string& fileName) : consumeFunction([file = std::make_shared<std::ofstream>(fileName + ".gz", std::ios::binary)] (std::span<const char> batch) mutable {
 		if (!file->good()) {
 			throw std::runtime_error("Can't write file");
 		}
@@ -1773,7 +1798,7 @@ public:
 	}) {}
 #endif
 
-	ODeflateArchive(std::vector<char> outVector) : consumeFunction([outVector] (std::span<const char> batch) mutable {
+	ODeflateArchive(std::vector<char>& outVector) : consumeFunction([&outVector] (std::span<const char> batch) mutable {
 		outVector.insert(outVector.end(), batch.begin(), batch.end());
 	}) {}
 
@@ -1787,10 +1812,7 @@ public:
 		}
 		deduplicated.flush();
 		writer.finalFlush();
-		uint32_t crc = input.checksum();
-		std::array<char, sizeof(uint32_t)> crcBytes = {};
-		memcpy(crcBytes.data(), &crc, crcBytes.size());
-		output.addBytes(crcBytes);
+		writeTrailer();
 		output.done();
 		consumeIfPossible();
 	}
@@ -1814,6 +1836,43 @@ public:
 	}
 	void writeSome(std::string_view section) {
 		writeSome(std::span<const char>(section.data(), section.size()));
+	}
+
+	class OpenWritingBuffer {
+		ODeflateArchive* parent = nullptr;
+		std::span<uint8_t> range = {};
+		OpenWritingBuffer(ODeflateArchive* parent) : parent(parent), range(parent->input.startFilling()) { }
+		friend class ODeflateArchive;
+
+	public:
+		OpenWritingBuffer() = default;
+		OpenWritingBuffer(OpenWritingBuffer&& another) {
+			operator=(std::move(another));
+		}
+		OpenWritingBuffer& operator=(OpenWritingBuffer&& another) {
+			if (parent)
+				throw std::logic_error("OpenWritingBuffer must be finished with doneFilling() before destruction");
+			parent = another.parent;
+			range = another.range;
+			another.parent = nullptr;
+			return *this;
+		}
+		std::span<uint8_t> accessRange() const {
+			return range;
+		}
+		void finish(int added) {
+			parent->input.doneFilling(added);
+			parent->deduplicator.deduplicateSome();
+			parent->consumeIfPossible();
+			parent = nullptr;
+		}
+		~OpenWritingBuffer() noexcept(false) {
+			if (parent)
+				throw std::logic_error("OpenWritingBuffer must be finished with doneFilling() before destruction");
+		}
+	};
+	OpenWritingBuffer openWritingBuffer() {
+		return OpenWritingBuffer(this);
 	}
 };
 
@@ -1983,15 +2042,31 @@ public:
 // Writes a .gz file, only takes care of the header, the rest is handled by its parent class ODeflateArchive
 template <StreamSettings Settings, BasicStringType StringType>
 class OGzFile : public ODeflateArchive<Settings, FastCrc32> {
+	void fillTrailerWriter() {
+		ODeflateArchive<Settings, FastCrc32>::writeAtEnd([this] {
+			auto writeInteger = [this] (uint32_t value) {
+				std::array<char, sizeof(uint32_t)> bytes = {};
+				memcpy(bytes.data(), &value, bytes.size());
+				ODeflateArchive<Settings, FastCrc32>::output.addBytes(bytes);
+			};
+			writeInteger(ODeflateArchive<Settings, FastCrc32>::input.checksum());
+			writeInteger(ODeflateArchive<Settings, FastCrc32>::input.getPosition() + ODeflateArchive<Settings, FastCrc32>::input.getPositionStart());
+		});
+	}
+
 public:
 	OGzFile(const GzFileInfo<StringType>& header, std::function<void(std::span<const char> batch)> consumeFunction)
 	: ODeflateArchive<Settings, FastCrc32>(consumeFunction) {
 		header.writeOut(consumeFunction);
+		fillTrailerWriter();
 	}
 
 #ifndef EZGZ_NO_FILE
 	OGzFile(const GzFileInfo<StringType>& header) : ODeflateArchive<Settings, FastCrc32>(header.name) {
-		header.writeOut();
+		header.writeOut([this] (std::span<const char> batch) {
+			ODeflateArchive<Settings, FastCrc32>::output.addBytes(batch);
+		});
+		fillTrailerWriter();
 	}
 #endif
 };
@@ -2024,6 +2099,45 @@ public:
 		return inputFile.info();
 	}
 };
+
+template <StreamSettings Settings, BasicStringType StringType>
+class OGzStreamBuffer : public std::streambuf {
+	OGzFile<Settings, StringType> outputFile;
+	typename OGzFile<Settings, StringType>::OpenWritingBuffer writeBuffer = {};
+
+	void prepareBuffer() {
+		writeBuffer = outputFile.openWritingBuffer();
+		auto range = writeBuffer.accessRange();
+		setp(reinterpret_cast<char*>(range.data()), reinterpret_cast<char*>(range.data()) + range.size());
+	}
+	void clearBuffer() {
+		writeBuffer.finish(pptr() - pbase());
+	}
+public:
+
+public:
+	OGzStreamBuffer(const GzFileInfo<StringType>& header, std::function<void(std::span<const char> batch)> consumeFunction)
+		: outputFile(header, consumeFunction) {
+		prepareBuffer();
+	}
+
+#ifndef EZGZ_NO_FILE
+	OGzStreamBuffer(const GzFileInfo<StringType>& header) : outputFile(header) {
+		prepareBuffer();
+	}
+#endif
+
+	int_type overflow(int_type added) override {
+		clearBuffer();
+		prepareBuffer();
+		writeBuffer.accessRange()[0] = added;
+		pbump(1);
+		return 0;
+	}
+	virtual ~OGzStreamBuffer() noexcept(true) {
+		clearBuffer();
+	};
+};
 }
 
 // Using IGzFile as std::istream, configurable
@@ -2048,9 +2162,22 @@ public:
 	using Detail::IGzStreamBuffer<Settings>::info;
 };
 
+template <StreamSettings Settings = DefaultCompressionSettings::Input, BasicStringType StringType = std::string>
+class BasicOGzStream : private Detail::OGzStreamBuffer<Settings, StringType>, public std::ostream {
+
+public:
+	BasicOGzStream(const GzFileInfo<StringType>& header, std::function<void(std::span<const char> batch)> consumeFunction)
+		: Detail::OGzStreamBuffer<Settings, StringType>(header, consumeFunction), std::ostream(this) { }
+
+#ifndef EZGZ_NO_FILE
+	BasicOGzStream(const GzFileInfo<StringType>& header) : Detail::OGzStreamBuffer<Settings, StringType>(header), std::ostream(this) {	}
+#endif
+};
+
+
 // Most obvious usage, default settings
 using IGzStream = BasicIGzStream<>;
-
+using OGzStream = BasicOGzStream<>;
 } // namespace EzGz
 
 #endif // EZGZ_HPP
