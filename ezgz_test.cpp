@@ -446,51 +446,69 @@ int main(int, char**) {
 			output.addByte('W');
 			output.addByte('h');
 			output.addByte('a');
-			inspect(output.consume());
+			inspect(output.getBuffer());
+			output.cleanBuffer();
 			output.addByte('t');
-			inspect(output.consume());
+			inspect(output.getBuffer());
+			output.cleanBuffer();
 			output.addByte(' ');
 			output.addByte('a');
-			inspect(output.consume());
+			inspect(output.getBuffer());
+			output.cleanBuffer();
 			output.addByte(' ');
 			output.addByte('d');
-			inspect(output.consume());
+			inspect(output.getBuffer());
+			output.cleanBuffer();
 			output.addByte('i');
 			output.addByte('s');
-			inspect(output.consume());
+			inspect(output.getBuffer());
+			output.cleanBuffer();
 			output.addByte('a');
 			output.addByte('a');
-			inspect(output.consume());
+			inspect(output.getBuffer());
+			output.cleanBuffer();
 			output.repeatSequence(2, 2);
-			inspect(output.consume());
+			inspect(output.getBuffer());
+			output.cleanBuffer();
 			output.addByte('s');
-			inspect(output.consume());
+			inspect(output.getBuffer());
+			output.cleanBuffer();
 			output.addByte('t');
 			output.addByte('e');
-			inspect(output.consume());
+			inspect(output.getBuffer());
+			output.cleanBuffer();
 			output.repeatSequence(2, 1);
-			inspect(output.consume());
+			inspect(output.getBuffer());
+			output.cleanBuffer();
 			output.repeatSequence(2, 1);
-			inspect(output.consume());
+			inspect(output.getBuffer());
+			output.cleanBuffer();
 			output.addByte('r');
 			output.addByte('!');
-			inspect(output.consume());
+			inspect(output.getBuffer());
+			output.cleanBuffer();
 			output.addByte(' ');
 			output.addByte('H');
-			inspect(output.consume());
+			inspect(output.getBuffer());
+			output.cleanBuffer();
 			output.addByte('a');
 			output.addByte('h');
-			inspect(output.consume());
+			inspect(output.getBuffer());
+			output.cleanBuffer();
 			output.repeatSequence(2, 2);
-			inspect(output.consume());
+			inspect(output.getBuffer());
+			output.cleanBuffer();
 			output.repeatSequence(2, 2);
-			inspect(output.consume());
+			inspect(output.getBuffer());
+			output.cleanBuffer();
 			output.addByte('a');
 			output.addByte('!');
-			inspect(output.consume());
+			inspect(output.getBuffer());
+			output.cleanBuffer();
 			output.done();
 			doATest(output.available() > 0, true);
-			inspect(output.consume());
+			inspect(output.getBuffer());
+			output.cleanBuffer();
 		}
 		{
 			ByteOutput<SettingsWithOutputSize<8, 3>::Output, NoChecksum> output = {};
@@ -501,10 +519,12 @@ int main(int, char**) {
 			output.addByte('t');
 			output.addByte(' ');
 			output.addByte('a');
-			inspect(output.consume(4));
+			inspect(output.getBuffer());
+			output.cleanBuffer(4);
 			output.addByte(' ');
 			output.addByte('d');
-			inspect(output.consume(5));
+			inspect(output.getBuffer());
+			output.cleanBuffer(5);
 		}
 	}
 
@@ -648,7 +668,7 @@ int main(int, char**) {
 			}
 		}
 		output.done();
-		std::span<const char> obtained = output.consume();
+		std::span<const char> obtained = output.getBuffer();
 		doATest(obtained.size(), 7u);
 		doATest(int(uint8_t(obtained[0])), 0x4b);
 		doATest(int(uint8_t(obtained[1])), 0x4c);
@@ -682,7 +702,7 @@ int main(int, char**) {
 			}
 		}
 		output.done();
-		std::span<const char> obtained = output.consume();
+		std::span<const char> obtained = output.getBuffer();
 		doATest(std::ssize(obtained), 11);
 		doATest(int(uint8_t(obtained[0])), 0xcb);
 		doATest(int(uint8_t(obtained[1])), 0x48);
@@ -730,7 +750,7 @@ int main(int, char**) {
 			}
 		}
 		output.done();
-		std::span<const char> obtained = output.consume();
+		std::span<const char> obtained = output.getBuffer();
 		// TODO: Assert the obtained part is shorter than if it was compressed using static compression
 		std::vector<char> decompressed = readDeflateIntoVector(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(obtained.data()), obtained.size()));
 		std::string_view decompressedStr(reinterpret_cast<const char*>(decompressed.data()), decompressed.size());
@@ -814,7 +834,7 @@ int main(int, char**) {
 			compressed.insert(compressed.end(), batch.begin(), batch.end());
 		};
 		GzFileInfo<std::string> info = {"secret"};
-		OGzFile<SettingsWithInputSize<200, 35>::Input, std::string> compressor(info, consumeFunction);
+		OGzFile<DefaultCompressionSettings, std::string> compressor(info, consumeFunction);
 		compressor.writeSome(std::string_view("Hahahahahaha!\n"));
 		compressor.writeSome(std::string_view("Mwahahahahaha!"));
 		compressor.flush();

@@ -40,6 +40,14 @@ concept DecompressionSettings = std::constructible_from<typename T::Checksum> &&
 };
 
 template <typename T>
+concept CompressionSettings = std::constructible_from<typename T::Checksum> && InputStreamSettings<typename T::Input>
+			&& StreamSettings<typename T::Output> && StreamSettings<typename T::DeduplicationProperties>
+			&& requires(typename T::Checksum checksum) {
+	int(checksum());
+	int(checksum(std::span<const uint8_t>()));
+};
+
+template <typename T>
 concept BasicStringType = std::constructible_from<T> && requires(T value) {
 	value += 'a';
 	std::string_view(value);
@@ -184,13 +192,22 @@ struct DefaultDecompressionSettings : MinDecompressionSettings {
 	constexpr static bool verifyChecksum = true;
 };
 
-struct DefaultCompressionSettings : EzGz::DefaultDecompressionSettings {
-	using Checksum = EzGz::NoChecksum;
-	struct Input : DefaultDecompressionSettings::Input {
+struct DefaultCompressionSettings {
+	struct Input {
 		constexpr static int maxSize = 30000;
 		constexpr static int minSize = 10000;
 		constexpr static int lookAheadSize = 300;
 	};
+	struct DeduplicationProperties {
+		constexpr static int maxSize = 30000;
+		constexpr static int minSize = 10000;
+	};
+	struct Output {
+		constexpr static int maxSize = 40000;
+		constexpr static int minSize = 0;
+	};
+
+	using Checksum = FastCrc32;
 };
 
 namespace Detail {
@@ -256,7 +273,7 @@ public:
 	}
 
 	bool hasMoreDataInBuffer() const {
-		return position < filled;
+		return position + lookAheadSize < filled;
 	}
 
 	uint64_t getBytes(int amount) {
@@ -292,6 +309,7 @@ public:
 	uint64_t getEightBytesFromCurrentPosition() {
 		ensureSize(1);
 		uint64_t got = getEightBytesAtPosition(position);
+//		std::cout << "Got eight bytes at " << position << std::endl;
 		position++;
 		return got;
 	}
@@ -511,8 +529,12 @@ private:
 
 	void ensureSize(int size) {
 		if (position + size > std::ssize(deduplicated)) [[unlikely]] {
+//			std::cout << "Submitting up to " << position << " (max at " << std::ssize(deduplicated) << ")" << std::endl;
 			Section section(std::span<const int16_t>(deduplicated.begin(), deduplicated.begin() + position));
 			int consumed = submit(section, false);
+			if (consumed < std::ssize(deduplicated) - position - size)
+				throw std::runtime_error("DeduplicatedStream must have a submit callback that consumes at least 4 bytes");
+//			std::cout << "It removed " << consumed << " bytes" << std::endl;
 			memmove(deduplicated.data(), deduplicated.data() + consumed, (position - consumed) * sizeof(int16_t));
 			position -= consumed;
 		}
@@ -576,9 +598,10 @@ template <StreamSettings Settings, typename Checksum>
 class ByteOutput {
 	std::array<char, Settings::maxSize> buffer = {};
 	int used = 0; // Number of bytes filled in the buffer (valid data must start at index 0)
-	int consumed = 0; // The last byte that was returned by consume()
+	int kept = 0;
 	bool expectsMore = true; // If we expect more data to be present
 	Checksum checksum = {};
+	int writtenOut = 0; // TOOD: Remove
 
 	void checkSize(int added = 1) {
 		if (used + added > std::ssize(buffer)) [[unlikely]] {
@@ -591,45 +614,35 @@ public:
 		return buffer.size() - used;
 	}
 
-	bool canConsume(const int bytesToKeep = 0) {
-		int wouldConsume = expectsMore ? consumed : used;
-		int wouldKeep = std::min(bytesToKeep, wouldConsume);
-		int wouldRemove = wouldConsume - wouldKeep;
-		int minimum = Settings::minSize - used + wouldConsume;
-		if (wouldKeep < minimum) {
-			wouldRemove = wouldConsume - wouldKeep;
-		}
-		return (wouldRemove > 0);
+	int minSize() {
+		return expectsMore ? Settings::minSize : 0;
 	}
 
-	std::span<const char> consume(const int bytesToKeep = 0) {
-		// Last batch has to be handled differently
-		if (!expectsMore) [[unlikely]] {
-			std::span<const char> returning = std::span<const char>(buffer.data() + consumed, used - consumed);
-			checksum(std::span<uint8_t>(reinterpret_cast<uint8_t*>(buffer.data() + consumed), used - consumed));
+	std::span<const char> getBuffer() {
+//		std::cout << "Getting buffer range " << kept << " - " << (used - kept) << std::endl;
+		return std::span<const char>(buffer.data() + kept, used - kept);
+	}
 
-			consumed = used;
-			return returning;
+	void cleanBuffer(int leave = 0) {
+		leave = std::max(leave, expectsMore? Settings::minSize : 0);
+//		std::cout << "Cleaning buffer, leaving " << leave << " behind" << std::endl;
+		if (used - leave <= 0) {
+//			std::cout << "No need to write anything" << std::endl;
+			return;
 		}
-
-		// Clean the space from the previous consume() call
-		int bytesKept = std::min(bytesToKeep, consumed);
-		int removing = consumed - bytesKept;
-		int minimum = Settings::minSize - used + consumed; // Ensure we keep enough bytes that the operation will end with less valid data in the buffer than the mandatory minimum
-		if (bytesKept < minimum) {
-			bytesKept = minimum;
-			removing = consumed - bytesKept;
+		if (leave == 0) {
+			checksum(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(buffer.data()), used));
+			writtenOut += used;
+			used = 0;
+			kept = 0;
+		} else {
+			checksum(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(buffer.data()), used - leave));
+			memmove(buffer.data(), buffer.data() + used - leave, leave);
+			writtenOut += used - leave;
+			used = leave;
+			kept = leave;
 		}
-		if (removing < 0) [[unlikely]] {
-			throw std::logic_error("consume() cannot keep more bytes than it provided before");
-		}
-		memmove(buffer.data(), buffer.data() + removing, used - removing);
-		used -= removing;
-		consumed = used; // Make everything in the buffer available (except the data returned earlier)
-
-		// Return a next batch
-		checksum(std::span<uint8_t>(reinterpret_cast<uint8_t*>(buffer.data() + bytesKept), consumed - bytesKept));
-		return std::span<const char>(buffer.data() + bytesKept, consumed - bytesKept);
+//		std::cout << "Wrote " << writtenOut << " bytes" << std::endl;
 	}
 
 	void addByte(char byte) {
@@ -677,9 +690,13 @@ class BitOutput {
 
 	void doEmpty(int bytes) {
 		const char* dataAsBytes = reinterpret_cast<char*>(&data);
-		if constexpr (std::endian::native == std::endian::little)
+		if constexpr (std::endian::native == std::endian::little) {
+			std::array<char, 8> moved = {};
+			for (int i = 0; i < bytes; i++)
+				moved[i] = dataAsBytes[i];
+//			output.addBytes(moved);
 			output.addBytes(std::span<const char>(dataAsBytes, bytes));
-		else {
+		} else {
 			std::array<char, 8> invertedBytes = {};
 			for (int i = 0; i < bytes; i++) {
 				invertedBytes[bytes - i] = dataAsBytes[i];
@@ -917,6 +934,7 @@ public:
 	void deduplicateSome() {
 		do {
 			uint64_t sequence = input.getEightBytesFromCurrentPosition();
+//			std::cout << "Sequence is " << sequence << std::endl;
 			// Shift positions int the map to the new offset
 			if (input.getPositionStart() != positionStart) [[unlikely]] {
 				int newStart = input.getPositionStart();
@@ -945,6 +963,7 @@ public:
 					}
 					break;
 				}
+//				std::cout << "Saving at " << sequenceHash << std::endl;
 				lookbackIndexes[index].positions[sequenceHash] = position;
 			}
 			matchOver:; // For breaking from double loop
@@ -1099,15 +1118,21 @@ class DeflateReader {
 					return true; // Out of space
 				}
 			}
+			std::string appended = "";
 			while (parent->output.available()) {
 				int word = codes.readWord();
 
 				if (word < 256) {
 //					std::cout << "Found letter " << word << std::endl;
+					appended += word;
 					parent->output.addByte(word);
 				} else if (word == 256) [[unlikely]] {
 					break;
 				} else {
+					if (appended == "allegi") {
+						std::cout << "Found a " << appended << std::endl;
+					}
+					appended = "";
 					int length = word - 254;
 					if (length > 10) {
 						length = input.parseLongerSize(length);
@@ -1410,6 +1435,9 @@ class HuffmanWriter {
 			}
 			sortLastLength();
 
+			if (capacity < 0) {
+				throw std::logic_error("Didn't generate the Huffman code correctly");
+			}
 			if (capacity > 0) { // This is not only suboptimal, gunzip requires every Huffman code to be valid (the standard does not)
 				throw std::logic_error("Didn't use all capacity available for Huffman coding");
 			}
@@ -1464,7 +1492,7 @@ public:
 		bitOutput.reset();
 	}
 
-	void writeBatch(typename DeduplicatedStream<DeduplicatedSettings>::Section section, bool isLast) {
+	void writeBatch(typename DeduplicatedStream<DeduplicatedSettings>::Section& section, bool isLast) {
 		// Baseline, dynamic Hufffman coding won't be used if it's better; TODO: Why not constexpr?
 		static HuffmanTable<286> staticWordEncoding = HuffmanTable<286>(typename HuffmanTable<286>::UseDefaultLengthEncoding());
 		static HuffmanTable<30> staticDistanceEncoding = HuffmanTable<30>(typename HuffmanTable<30>::UseDefaultDistanceEncoding());
@@ -1498,8 +1526,8 @@ public:
 				break;
 			}
 		}
-		int lowestDistanceWord = 1;
-		for (int i = 1; i < std::ssize(distanceCounts.counts); i++) {
+		int lowestDistanceWord = 0;
+		for (int i = 0; i < std::ssize(distanceCounts.counts); i++) {
 			if (distanceCounts.counts[i].count != 0) {
 				lowestDistanceWord = i;
 				break;
@@ -1566,9 +1594,9 @@ public:
 		section.position = 0;
 		while (!section.atEnd()) {
 			bool alsoOthers = false;
-			typename decltype(section)::CodeRemainderWithLength length = {};
+			typename std::decay_t<decltype(section)>::CodeRemainderWithLength length = {};
 			int distanceWord = 0;
-			typename decltype(section)::CodeRemainderWithLength distance = {};
+			typename std::decay_t<decltype(section)>::CodeRemainderWithLength distance = {};
 			int word = section.readWord([&] (auto lengthExtraAssigned, int distanceWordAssigned, auto distanceExtraAssigned) {
 				alsoOthers = true;
 				length = lengthExtraAssigned;
@@ -1603,8 +1631,9 @@ std::vector<char> readDeflateIntoVector(std::function<int(std::span<uint8_t> bat
 	bool workToDo = false;
 	do {
 		workToDo = reader.parseSome();
-		std::span<const char> batch = output.consume();
+		std::span<const char> batch = output.getBuffer();
 		result.insert(result.end(), batch.begin(), batch.end());
+		output.cleanBuffer();
 	} while (workToDo);
 	return result;
 }
@@ -1638,16 +1667,15 @@ std::vector<uint8_t> writeDeflateIntoVector(std::function<int(std::span<char> ba
 
 		do {
 			deduplicator.deduplicateSome();
-			if (output.canConsume() > 0) {
-				std::span<const char> batch = output.consume();
-				result.insert(result.end(), batch.begin(), batch.end());
-			}
+			std::span<const char> batch = output.getBuffer();
+			result.insert(result.end(), batch.begin(), batch.end());
+			output.cleanBuffer();
 		} while (!input.isAtEnd());
 
 		deduplicated.flush();
 		writer.finalFlush();
 		output.done();
-		std::span<const char> batch = output.consume();
+		std::span<const char> batch = output.getBuffer();
 		result.insert(result.end(), batch.begin(), batch.end());
 	}
 	return result;
@@ -1673,6 +1701,15 @@ protected:
 	Detail::ByteOutput<typename Settings::Output, typename Settings::Checksum> output;
 	Detail::DeflateReader<Settings> deflateReader = {input, output};
 	bool done = false;
+	int bytesKept = 0;
+
+	bool bufferNeedsCleaning = false;
+	void cleanBufferIfNeeded() {
+		if (bufferNeedsCleaning) {
+			output.cleanBuffer(bytesKept);
+			bufferNeedsCleaning = false;
+		}
+	}
 
 	virtual void onFinish() {}
 
@@ -1702,24 +1739,27 @@ public:
 
 	// Returns whether there are more bytes to read
 	std::optional<std::span<const char>> readSome(int bytesToKeep = 0) {
+		cleanBufferIfNeeded();
 		if (done) {
 			return std::nullopt;
 		}
 		bool moreStuffToDo = deflateReader.parseSome();
-		std::span<const char> batch = output.consume(bytesToKeep);
+		std::span<const char> batch = output.getBuffer();
+		bytesKept = bytesToKeep;
 		if (!moreStuffToDo) {
 			onFinish();
 			done = true;
 		}
+		bufferNeedsCleaning = true;
 		return batch;
 	}
 
 	void readByLines(const std::function<void(std::span<const char>)> reader, char separator = '\n') {
 		int keeping = 0;
-		std::span<const char> batch = {};
 		bool wasSeparator = false;
-		while (std::optional<std::span<const char>> batchOrNot = readSome(keeping)) {
-			batch = *batchOrNot;
+		std::span<const char> batch = {};
+		while (!done) {
+			batch = *readSome(keeping);
 			std::span<const char>::iterator start = batch.begin();
 			for (std::span<const char>::iterator it = start; it != batch.end(); ++it) {
 				if (wasSeparator) {
@@ -1756,11 +1796,11 @@ public:
 	}
 };
 
-template <StreamSettings Settings, typename Checksum = NoChecksum>
+template <CompressionSettings Settings, typename Checksum = NoChecksum>
 class ODeflateArchive {
 protected:
-	Detail::ByteOutput<Settings, NoChecksum> output;
-	Detail::ByteInput<Settings, Checksum> input = {[this] (std::span<uint8_t>) -> int {
+	Detail::ByteOutput<typename Settings::Output, NoChecksum> output;
+	Detail::ByteInput<typename Settings::Input, Checksum> input = {[this] (std::span<uint8_t>) -> int {
 		return 0; // TODO: The input buffer should be able to renew from this
 	}};
 
@@ -1768,19 +1808,19 @@ protected:
 		writeTrailer = trailerWriter;
 	}
 private:
-	Detail::HuffmanWriter<Settings, Settings> writer = {output};
+	Detail::HuffmanWriter<typename Settings::Output, typename Settings::DeduplicationProperties> writer = {output};
 	std::function<void(std::span<const char> batch)> consumeFunction;
-	Detail::DeduplicatedStream<Settings> deduplicated = {[this] (typename Detail::DeduplicatedStream<Settings>::Section section, bool lastCall) {
+	Detail::DeduplicatedStream<typename Settings::DeduplicationProperties> deduplicated = {[this]
+				(typename Detail::DeduplicatedStream<typename Settings::DeduplicationProperties>::Section section, bool lastCall) {
 		writer.writeBatch(section, lastCall);
 		return section.position;
 	}};
-	Detail::Deduplicator<Settings, Checksum, Settings> deduplicator = {input, deduplicated};
+	Detail::Deduplicator<typename Settings::Input, Checksum, typename Settings::DeduplicationProperties> deduplicator = {input, deduplicated};
 
-	void consumeIfPossible() {
-		if (output.canConsume()) {
-			std::span<const char> batch = output.consume();
-			consumeFunction(batch);
-		}
+	void consume() {
+		std::span<const char> batch = output.getBuffer();
+		consumeFunction(batch);
+		output.cleanBuffer();
 	}
 
 	std::function<void()> writeTrailer;
@@ -1814,7 +1854,7 @@ public:
 		writer.finalFlush();
 		writeTrailer();
 		output.done();
-		consumeIfPossible();
+		consume();
 	}
 
 	void writeSome(std::span<const char> section) {
@@ -1830,7 +1870,7 @@ public:
 			});
 			if (doDeduplicate) {
 				deduplicator.deduplicateSome();
-				consumeIfPossible();
+				consume();
 			}
 		}
 	}
@@ -1863,7 +1903,7 @@ public:
 		void finish(int added) {
 			parent->input.doneFilling(added);
 			parent->deduplicator.deduplicateSome();
-			parent->consumeIfPossible();
+			parent->consume();
 			parent = nullptr;
 		}
 		~OpenWritingBuffer() noexcept(false) {
@@ -2021,6 +2061,8 @@ class IGzFile : public IDeflateArchive<Settings> {
 	using Deflate = IDeflateArchive<Settings>;
 
 	void onFinish() override {
+		Deflate::output.done();
+		Deflate::output.cleanBuffer();
 		uint32_t expectedCrc = Deflate::input.template getInteger<uint32_t>();
 		if constexpr(Settings::verifyChecksum) {
 			auto realCrc = Deflate::output.getChecksum()();
@@ -2040,7 +2082,7 @@ public:
 };
 
 // Writes a .gz file, only takes care of the header, the rest is handled by its parent class ODeflateArchive
-template <StreamSettings Settings, BasicStringType StringType>
+template <CompressionSettings Settings, BasicStringType StringType>
 class OGzFile : public ODeflateArchive<Settings, FastCrc32> {
 	void fillTrailerWriter() {
 		ODeflateArchive<Settings, FastCrc32>::writeAtEnd([this] {
@@ -2100,7 +2142,7 @@ public:
 	}
 };
 
-template <StreamSettings Settings, BasicStringType StringType>
+template <CompressionSettings Settings, BasicStringType StringType>
 class OGzStreamBuffer : public std::streambuf {
 	OGzFile<Settings, StringType> outputFile;
 	typename OGzFile<Settings, StringType>::OpenWritingBuffer writeBuffer = {};
@@ -2162,7 +2204,7 @@ public:
 	using Detail::IGzStreamBuffer<Settings>::info;
 };
 
-template <StreamSettings Settings = DefaultCompressionSettings::Input, BasicStringType StringType = std::string>
+template <CompressionSettings Settings = DefaultCompressionSettings, BasicStringType StringType = std::string>
 class BasicOGzStream : private Detail::OGzStreamBuffer<Settings, StringType>, public std::ostream {
 
 public:
