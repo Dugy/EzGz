@@ -1847,6 +1847,7 @@ public:
 	}
 
 	void flush() {
+		input.doneFilling(0);
 		if (input.hasMoreDataInBuffer()) {
 			deduplicator.deduplicateSome();
 		}

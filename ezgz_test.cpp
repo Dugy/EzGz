@@ -598,11 +598,11 @@ int main(int, char**) {
 	{
 		std::cout << "Testing Deduplicator 2" << std::endl;
 		std::string input = "abaabbbabaababbaababaaaabaaabbbbbaa";
-		InputHelper<40, 22, 11> byteReader(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(input.c_str()), input.size()));
+		InputHelper<40, 22, 0> byteReader(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(input.c_str()), input.size()));
 		DeduplicationVerifier<TestStreamSettings<12, 5>> verifier;
 		{
 			Detail::DeduplicatedStream<TestStreamSettings<12, 5>> output(verifier.reader());
-			Detail::Deduplicator<SettingsWithInputSize<40, 22, 11>::Input, NoChecksum, TestStreamSettings<12, 5>, 20, 23> deduplicator(byteReader, output);
+			Detail::Deduplicator<SettingsWithInputSize<40, 22, 0>::Input, NoChecksum, TestStreamSettings<12, 5>, 20, 23> deduplicator(byteReader, output);
 			deduplicator.deduplicateSome();
 		}
 		doATest(verifier.parsed, "abaabbbabaababbaababaaaabaaabbbbbaa");
@@ -612,11 +612,11 @@ int main(int, char**) {
 	{
 		std::cout << "Testing Deduplicator 3" << std::endl;
 		std::string input = "The main interesting thing about it is the deflate algorithm.";
-		InputHelper<50, 20, 10> byteReader(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(input.c_str()), input.size()));
+		InputHelper<70, 20, 0> byteReader(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(input.c_str()), input.size()));
 		DeduplicationVerifier<TestStreamSettings<10, 4>> verifier;
 		{
 			Detail::DeduplicatedStream<TestStreamSettings<10, 4>> output(verifier.reader());
-			Detail::Deduplicator<SettingsWithInputSize<50, 20, 10>::Input, NoChecksum, TestStreamSettings<10, 4>, 20, 23> deduplicator(byteReader, output);
+			Detail::Deduplicator<SettingsWithInputSize<70, 20, 0>::Input, NoChecksum, TestStreamSettings<10, 4>, 20, 23> deduplicator(byteReader, output);
 			deduplicator.deduplicateSome();
 		}
 		doATest(verifier.parsed, "The main interesting thing about it is the deflate algorithm.");
