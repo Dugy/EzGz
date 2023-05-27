@@ -17,7 +17,7 @@ int main(int argc, char** argv) {
 
 	std::chrono::microseconds duration = {};
 	{
-		EzGz::OGzStream compressor = {EzGz::GzFileInfo<std::string>(inputName)};
+		EzGz::BasicOGzStream<EzGz::DefaultCompressionSettings> compressor = {EzGz::GzFileInfo<std::string>(inputName)};
 		compressor.exceptions(std::ifstream::failbit);
 		std::ifstream input(inputName, std::ios::binary);
 		input.exceptions(std::ifstream::failbit);

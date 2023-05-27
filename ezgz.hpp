@@ -45,6 +45,7 @@ concept CompressionSettings = std::constructible_from<typename T::Checksum> && I
 			&& requires(typename T::Checksum checksum) {
 	int(checksum());
 	int(checksum(std::span<const uint8_t>()));
+	int(T::HuffmanSectionSize);
 };
 
 template <typename T>
@@ -199,15 +200,20 @@ struct DefaultCompressionSettings {
 		constexpr static int lookAheadSize = 300;
 	};
 	struct DeduplicationProperties {
-		constexpr static int maxSize = 30000;
+		constexpr static int maxSize = 50000;
 		constexpr static int minSize = 10000;
 	};
 	struct Output {
-		constexpr static int maxSize = 40000;
+		constexpr static int maxSize = 100000;
 		constexpr static int minSize = 0;
 	};
 
+	constexpr static int HuffmanSectionSize = 1000000;
 	using Checksum = FastCrc32;
+};
+
+struct BestCompressionSettings : DefaultCompressionSettings {
+	constexpr static int HuffmanSectionSize = 1000;
 };
 
 namespace Detail {
@@ -514,6 +520,11 @@ public:
 		bool atEnd() const {
 			return position == std::ssize(section);
 		}
+		int endPosition() const {
+			return std::ssize(section);
+		}
+
+		constexpr static int MaxSize = Settings::maxSize;
 
 	private:
 		std::span<const int16_t> section = {};
@@ -1238,7 +1249,7 @@ public:
 	}
 };
 
-template <StreamSettings OutputSettings, StreamSettings DeduplicatedSettings>
+template <StreamSettings OutputSettings, StreamSettings DeduplicatedSettings, int BlockSize = 1000000>
 class HuffmanWriter {
 	ByteOutput<OutputSettings, NoChecksum>& byteOutput;
 	std::optional<BitOutput<OutputSettings, NoChecksum>> bitOutput;
@@ -1259,7 +1270,6 @@ class HuffmanWriter {
 			}
 		};
 		std::array<Entry, Size> codes = {};
-		int length = 0;
 
 		HuffmanTable() = default;
 		struct UseDefaultLengthEncoding {};
@@ -1369,17 +1379,23 @@ class HuffmanWriter {
 
 		HuffmanTable<Size> generateEncoding(int left, bool ascending) { // Trying to do this without the bool flag will bloat the code a lot
 			std::array<Entry, Size> sortedCounts = counts;
-			std::sort(sortedCounts.begin(), sortedCounts.end(), [] (Entry first, Entry second) {
-				return first.count > second.count;
-			});
+			// Make sure we have enough elements to form a Huffman table
+			int usedCodes = 0;
+			for (Entry& entry : sortedCounts) {
+				if (entry.count > 0)
+					usedCodes++;
+			}
 			HuffmanTable<Size> made = {};
-			if (left == 0) { // Empty table is not permitted
-				sortedCounts[0].count = 1;
-				left = 1;
+			if (usedCodes == 0) {
+				return made;
 			}
 
 			int sizeIncrement = 1;
 			int capacity = 0x10000;
+
+			std::sort(sortedCounts.begin(), sortedCounts.end(), [] (Entry first, Entry second) {
+				return first.count > second.count;
+			});
 
 			// Assign lengths, assign as much capacity as possible but not more than the word's proportion in the total number of words
 			for (Entry& word : sortedCounts) {
@@ -1412,7 +1428,6 @@ class HuffmanWriter {
 				}
 				for (int i = sameLengthRangeBegin; i < sameLengthRangeEnd; i++) {
 					made.codes[sortedCounts[i].index] = typename HuffmanTable<Size>::Entry(currentCode, sortedCounts[i].length);
-					made.length += sortedCounts[i].count * sortedCounts[i].length;
 					//std::cout << "Code for " << word.index << " is now " << made.codes[word.index].code << " with length " << int(made.codes[word.index].length) << " from current code " << currentCode << std::endl;
 					currentCode += 1;
 				}
@@ -1421,10 +1436,12 @@ class HuffmanWriter {
 			int previousLength = sortedCounts.front().length;
 			for (Entry& word : sortedCounts) {
 				if (word.count == 0) break; // In this case, we're done sooner
-				int neededToUpgrade = 0x10000 >> word.length;
-				if (neededToUpgrade <= capacity) {
-					capacity -= neededToUpgrade;
-					word.length--;
+				if (usedCodes != 1) {
+					int neededToUpgrade = 0x10000 >> word.length;
+					if (neededToUpgrade <= capacity) {
+						capacity -= neededToUpgrade;
+						word.length--;
+					}
 				}
 				if (word.length != previousLength) {
 					sortLastLength();
@@ -1438,7 +1455,7 @@ class HuffmanWriter {
 			if (capacity < 0) {
 				throw std::logic_error("Didn't generate the Huffman code correctly");
 			}
-			if (capacity > 0) { // This is not only suboptimal, gunzip requires every Huffman code to be valid (the standard does not)
+			if (capacity > 0 && usedCodes != 1) { // This is not only suboptimal, gunzip requires every Huffman code to be valid (the standard does not)
 				throw std::logic_error("Didn't use all capacity available for Huffman coding");
 			}
 
@@ -1448,7 +1465,7 @@ class HuffmanWriter {
 		int sizeWithEncoding(const HuffmanTable<Size>& encoding) {
 			int total = 0;
 			for (Entry letter : counts) {
-				total += letter.count * encoding.codes[letter.index];
+				total += letter.count * encoding.codes[letter.index].length;
 			}
 			return total;
 		}
@@ -1463,23 +1480,6 @@ class HuffmanWriter {
 			return totalWords;
 		}
 	};
-
-	template <int OtherSize>
-	void encodeCode(const HuffmanTable<19>& encoding, const HuffmanTable<OtherSize>& code, int endAt, int increment) {
-		code.runThroughCodeEncoding(endAt, increment, [this, &encoding] (int word, int extra) {
-//			std::cout << "Adding " << int(encoding.codes[word].length) << " bits of code " << encoding.codes[word].code << std::endl;
-			bitOutput->addBits(encoding.codes[word].code, encoding.codes[word].length);
-			if (word == 16) {
-				bitOutput->addBits(extra - 3, 2);
-			} else if (word == 17) {
-				bitOutput->addBits(extra - 3, 3);
-//				std::cout << "...followed by 3 bits of " << extra - 3 << std::endl;
-			} else if (word == 18) {
-				bitOutput->addBits(extra - 11, 7);
-//				std::cout << "...followed by 7 bits of " << extra - 11 << std::endl;
-			}
-		});
-	}
 
 public:
 	HuffmanWriter(ByteOutput<OutputSettings, NoChecksum>& output) : byteOutput(output) {}
@@ -1498,124 +1498,285 @@ public:
 		static HuffmanTable<30> staticDistanceEncoding = HuffmanTable<30>(typename HuffmanTable<30>::UseDefaultDistanceEncoding());
 		// Avoid having to convert the oddly positioned distance codes in the range of -30 to -1
 		static typename HuffmanTable<30>::Entry* staticDistanceZero = staticDistanceEncoding.codes.data() + 30;
-		int staticLength = 0;
 
-		// Find the distribution of words
-		FrequencyCounts<286> wordCounts = {};
-		FrequencyCounts<30> distanceCounts = {};
-		typename FrequencyCounts<30>::Entry* frequencyDistanceZero = distanceCounts.counts.data() + 30;
-		int words = 0;
-		int distances = 0;
-		while (!section.atEnd()) {
-			int word = section.readWord([&] (auto, int distanceWord, auto) {
-				frequencyDistanceZero[distanceWord].count++;
-				staticLength += staticDistanceZero[distanceWord].length;
-				distances++;
-			});
-			wordCounts.counts[word].count++;
-			staticLength += staticWordEncoding.codes[word].length;
-			words++;
-		}
-		wordCounts.counts[256].count++; // We need to end the block somewhere
+		struct Counts {
+			FrequencyCounts<286> wordCounts = {};
+			FrequencyCounts<30> distanceCounts = {};
+			int lengthsAfter256 = 1;
+			int lowestDistanceWord = 29;
+			int properEndPos = 0;
+			int words = 0;
+			int distances = 0;
+			int staticLength = 0;
 
-		// We'll need to stop writing lengths from some point
-		int lengthsAfter256 = 1;
-		for (int i = std::ssize(wordCounts.counts) - 1; i > 257; i--) {
-			if (wordCounts.counts[i].count != 0) {
-				lengthsAfter256 = i - 256;
-				break;
+			typename FrequencyCounts<30>::Entry* frequencyDistanceZero() {
+				return distanceCounts.counts.data() + 30;
+			}
+
+			Counts(typename DeduplicatedStream<DeduplicatedSettings>::Section& section, int startPos, int endPos) {
+				section.position = startPos;
+				while (section.position < endPos) {
+					int word = section.readWord([&] (auto, int distanceWord, auto) {
+						frequencyDistanceZero()[distanceWord].count++;
+						staticLength += staticDistanceZero[distanceWord].length;
+						distances++;
+					});
+					if (word < 0) {
+						throw std::runtime_error("Corrupted stream boundaries");
+					}
+					wordCounts.counts[word].count++;
+					staticLength += staticWordEncoding.codes[word].length;
+					words++;
+				}
+				properEndPos = section.position; // We may have run through some trailers, need to update the start of the following block
+				wordCounts.counts[256].count++; // We need to end the block somewhere
+				words++;
+
+				// We'll need to stop writing lengths from some point
+				for (int i = std::ssize(wordCounts.counts) - 1; i > 257; i--) {
+					if (wordCounts.counts[i].count != 0) {
+						lengthsAfter256 = i - 256;
+						break;
+					}
+				}
+				for (int i = 0; i < std::ssize(distanceCounts.counts); i++) {
+					if (distanceCounts.counts[i].count != 0) {
+						lowestDistanceWord = i;
+						break;
+					}
+				}
+			}
+
+			Counts(const Counts& first, const Counts& second) // MUST be adjacent
+			: lengthsAfter256(std::max(first.lengthsAfter256, second.lengthsAfter256))
+			, lowestDistanceWord(std::min(first.lowestDistanceWord, second.lowestDistanceWord))
+			, properEndPos(std::max(first.properEndPos, second.properEndPos))
+			, words(first.words + second.words)
+			, distances(first.distances + second.distances)
+			, staticLength(first.staticLength + second.staticLength) {
+				for (int i = 0; i <= 256 + lengthsAfter256; i++) {
+					wordCounts.counts[i].count = first.wordCounts.counts[i].count + second.wordCounts.counts[i].count;
+				}
+				for (int i = std::ssize(distanceCounts.counts) - 1; i >= lowestDistanceWord; i--) {
+					distanceCounts.counts[i].count = first.distanceCounts.counts[i].count + second.distanceCounts.counts[i].count;
+				}
+
+				wordCounts.counts[256].count--; // One less ending
+				words--;
+			}
+		};
+
+		class Block {
+			typename DeduplicatedStream<DeduplicatedSettings>::Section* section = nullptr; // Pointer just to allow default assignment
+
+			bool enabled = true;
+			bool last = false;
+			Counts counts = {};
+			int startPos = 0;
+			int endPos = 0;
+			int total = 0;
+			int codeCodingTableLength = 0;
+
+			bool usesDynamic = false;
+			HuffmanTable<19> codeEncoding = {};
+			HuffmanTable<286> dynamicWordEncoding = {};
+			HuffmanTable<30> dynamicDistanceEncoding = {};
+
+		public:
+			Block(typename DeduplicatedStream<DeduplicatedSettings>::Section& section, Counts&& counts, int startPos, bool last)
+			: section(&section), last(last), counts(std::move(counts)), startPos(startPos), endPos(counts.properEndPos) {
+				if (startPos >= endPos) {
+					enabled = false;
+					return;
+				}
+
+				dynamicWordEncoding = counts.wordCounts.generateEncoding(counts.words, true /*ascending*/);
+				dynamicDistanceEncoding = counts.distanceCounts.generateEncoding(counts.distances, false /*descending*/);
+
+				// Find distribution and generate encodings for the definition of the Huffman code
+				FrequencyCounts<19> codeCounts = {};
+				int totalCodes = 0;
+				totalCodes += codeCounts.addToHuffmanTableLengths(dynamicWordEncoding, 257 + counts.lengthsAfter256, 1);
+				totalCodes += codeCounts.addToHuffmanTableLengths(dynamicDistanceEncoding, counts.lowestDistanceWord, -1);
+				codeEncoding = codeCounts.generateEncoding(totalCodes, true /*ascending*/);
+
+				for (int i = 0; i < std::ssize(codeCodingReorder); i++) {
+					if (codeEncoding.codes[i].length > 0) {
+						codeCodingTableLength = std::max<int>(codeCodingTableLength, codeCodingReorderInverse[i]);
+					}
+				}
+				codeCodingTableLength = std::max(codeCodingTableLength + 1, 4); // At least 4 codes must be written
+
+				// Now, we can estimate the size of the encoded part (minus the extra bits after some numbers because they're always the same)
+				int dynamicLength = 12 + codeCodingTableLength * 3; // Intro length
+				dynamicLength += codeCounts.sizeWithEncoding(codeEncoding); // Encoded codes
+				dynamicLength += 2 * codeCounts.counts[16].count + 3 * codeCounts.counts[17].count + 7 * codeCounts.counts[18].count; // Extra bits
+				dynamicLength += counts.wordCounts.sizeWithEncoding(dynamicWordEncoding); // Encoded words
+				dynamicLength += counts.distanceCounts.sizeWithEncoding(dynamicDistanceEncoding); // Encoded distances
+
+				// Pick the encoding
+				usesDynamic = (dynamicLength < counts.staticLength);
+				total = std::min(dynamicLength, counts.staticLength);
+			}
+			Block& operator=(const Block& other) = default;
+
+			void writeOut(BitOutput<OutputSettings, NoChecksum>& bitOutput) {
+				if (!enabled) {
+					return;
+				}
+
+				const HuffmanTable<286>* wordEncoding = (usesDynamic) ? &dynamicWordEncoding : &staticWordEncoding;
+				const HuffmanTable<30>* distanceEncoding = (usesDynamic) ? &dynamicDistanceEncoding : &staticDistanceEncoding;
+				const typename HuffmanTable<30>::Entry* distanceZero = distanceEncoding->codes.data() + 30;
+
+				bitOutput.addBits(last, 1);
+				if (usesDynamic) {
+					// Intro
+					bitOutput.addBits(0b10, 2);
+					bitOutput.addBits(counts.lengthsAfter256, 5);
+					bitOutput.addBits(29 - counts.lowestDistanceWord, 5);
+					bitOutput.addBits(codeCodingTableLength - 4, 4);
+
+					// Code encoding
+					for (int i = 0; i < codeCodingTableLength; i++) {
+		//				std::cout << "Writing " << int(codeEncoding.codes[codeCodingReorder[i]].length) << " for " << int(codeCodingReorder[i]) << std::endl;
+						bitOutput.addBits(codeEncoding.codes[codeCodingReorder[i]].length, 3); // Writing some bullshit here
+					}
+
+					// Code declaration
+					auto encodeCode = [this, &bitOutput] (const auto& code, int endAt, int increment) {
+						code.runThroughCodeEncoding(endAt, increment, [this, &bitOutput] (int word, int extra) {
+				//			std::cout << "Adding " << int(encoding.codes[word].length) << " bits of code " << encoding.codes[word].code << std::endl;
+							bitOutput.addBits(codeEncoding.codes[word].code, codeEncoding.codes[word].length);
+							if (word == 16) {
+								bitOutput.addBits(extra - 3, 2);
+							} else if (word == 17) {
+								bitOutput.addBits(extra - 3, 3);
+				//				std::cout << "...followed by 3 bits of " << extra - 3 << std::endl;
+							} else if (word == 18) {
+								bitOutput.addBits(extra - 11, 7);
+				//				std::cout << "...followed by 7 bits of " << extra - 11 << std::endl;
+							}
+						});
+					};
+
+					encodeCode(dynamicWordEncoding, 257 + counts.lengthsAfter256, 1);
+					encodeCode(dynamicDistanceEncoding, counts.lowestDistanceWord, -1);
+				} else {
+					bitOutput.addBits(0b01, 2);
+				}
+
+				// Encode the actual block
+				section->position = startPos;
+				while (section->position < endPos) {
+					bool alsoOthers = false;
+					typename std::decay_t<decltype(*section)>::CodeRemainderWithLength length = {};
+					int distanceWord = 0;
+					typename std::decay_t<decltype(*section)>::CodeRemainderWithLength distance = {};
+					int word = section->readWord([&] (auto lengthExtraAssigned, int distanceWordAssigned, auto distanceExtraAssigned) {
+						alsoOthers = true;
+						length = lengthExtraAssigned;
+						distanceWord = distanceWordAssigned;
+						distance = distanceExtraAssigned;
+					});
+					bitOutput.addBits(wordEncoding->codes[word].code, wordEncoding->codes[word].length);
+					if (alsoOthers) { // Hopefully this will be optimised out
+		//				std::cout << "Copy " << word << " +(" << length.remainder << ": " << length.length << ") with distance " << (-1 - distanceWord) << " +(" << distance.remainder << " - " << distance.length << ")" << std::endl;
+						if (word >= 265) {
+							bitOutput.addBitsAndCrop(length.remainder, length.length);
+						}
+						bitOutput.addBits(distanceZero[distanceWord].code, distanceZero[distanceWord].length);
+						if (distanceWord < -4) {
+							bitOutput.addBitsAndCrop(distance.remainder, distance.length);
+						}
+					}
+				}
+				bitOutput.addBits(wordEncoding->codes[256].code, wordEncoding->codes[256].length); // Ending
+			}
+
+			bool getEnabled() const {
+				return enabled;
+			}
+			void setEnabled(bool value) {
+				enabled = value;
+			}
+			int getStart() const {
+				return startPos;
+			}
+			int getEnd() const {
+				return endPos;
+			}
+			int totalSize() const {
+				return total;
+			}
+			bool isLast() const {
+				return last;
+			}
+			const Counts& getCounts() const {
+				return counts;
+			}
+		};
+
+		constexpr static int BlockCount = std::max(section.MaxSize / BlockSize, 1);
+		int previousEnd = 0;
+		std::array<Block, BlockCount> blocks = ArrayFiller([&] (int index) -> Block {
+			int end = (index + 1) * BlockSize;
+			bool thisOneIsLast = isLast;
+			if (end > section.endPosition()) {
+				end = section.endPosition();
+			} else thisOneIsLast = false;
+			Block made(section, Counts(section, previousEnd, std::min((index + 1) * BlockSize, section.endPosition())), previousEnd, thisOneIsLast);
+			previousEnd = made.getEnd();
+			return made;
+		});
+
+		auto considerMerge = [&section] (Block& first, Block& second) {
+			Block merged(section, Counts(first.getCounts(), second.getCounts()), first.getStart(), first.isLast() || second.isLast());
+			if (merged.totalSize() < first.totalSize() + second.totalSize()) {
+				first = merged;
+				second.setEnabled(false);
+			}
+		};
+		for (int width = 1; width < std::ssize(blocks) / 2; width *= 2) {
+			for (int start = 0; start < std::ssize(blocks); start += width * 2) {
+				int mid = start + width;
+				if (mid >= std::ssize(blocks))
+					break; // Past the end
+				int end = std::min<int>(start + width * 2, std::ssize(blocks));
+//				std::cout << "Connecting in ranges " << start << " - " << mid << " and " << mid << " - " << end << std::endl;
+				int startBlockIndex = mid - 1;
+				for ( ; startBlockIndex >= start; startBlockIndex--) {
+					if (blocks[startBlockIndex].getEnabled())
+						break;
+				}
+				if (startBlockIndex < start)
+					continue; // Found nothing
+				int endBlockIndex = mid;
+				for ( ; endBlockIndex < end; endBlockIndex++) {
+					if (blocks[startBlockIndex].getEnabled())
+						break;
+				}
+				if (endBlockIndex >= end)
+					continue; // Foud nothing
+
+//				std::cout << "Trying to fuse " << startBlockIndex << " and " << endBlockIndex << std::endl;
+				considerMerge(blocks[startBlockIndex], blocks[endBlockIndex]);
 			}
 		}
-		int lowestDistanceWord = 0;
-		for (int i = 0; i < std::ssize(distanceCounts.counts); i++) {
-			if (distanceCounts.counts[i].count != 0) {
-				lowestDistanceWord = i;
-				break;
-			}
-		}
+//		for (int i = 0; i < std::ssize(blocks); i++) {
+//			std::cout << "Block " << i << (blocks[i].getEnabled() ? " enabled" : " disabled") << std::endl;
+//			if (blocks[i].getEnabled()) {
+//				std::cout << "Range " << blocks[i].getStart() << " - " << blocks[i].getEnd() << std::endl;
+//			}
+//		}
 
-		// Generate necessary encodings
-		HuffmanTable<286> dynamicWordEncoding = wordCounts.generateEncoding(words + 1, true /*ascending*/);
-		HuffmanTable<30> dynamicDistanceEncoding = distanceCounts.generateEncoding(distances, false /*descending*/);
-
-		// Find distribution and generate encodings for the definition of the Huffman code
-		FrequencyCounts<19> codeCounts = {};
-		int totalCodes = 0;
-		totalCodes += codeCounts.addToHuffmanTableLengths(dynamicWordEncoding, 257 + lengthsAfter256, 1);
-		totalCodes += codeCounts.addToHuffmanTableLengths(dynamicDistanceEncoding, lowestDistanceWord, -1);
-		HuffmanTable<19> codeEncoding = codeCounts.generateEncoding(totalCodes, true /*ascending*/);
-
-		int codeCodingTableLength = 0;
-		for (int i = 0; i < std::ssize(codeCodingReorder); i++) {
-			if (codeEncoding.codes[i].length > 0) {
-				codeCodingTableLength = std::max<int>(codeCodingTableLength, codeCodingReorderInverse[i]);
-			}
-		}
-		codeCodingTableLength = std::max(codeCodingTableLength + 1, 4); // At least 4 codes must be written
-
-		// Now, we can estimate the size of the encoded part (minus the extra bits after some numbers because they're always the same)
-		int dynamicLength = 12 + codeCodingTableLength * 3; // Intro length
-		dynamicLength += codeEncoding.length; // Encoded codes
-		dynamicLength += 2 * codeCounts.counts[16].count + 3 * codeCounts.counts[17].count + 7 * codeCounts.counts[18].count; // Extra bits
-		dynamicLength += dynamicWordEncoding.length; // Encoded words
-		dynamicLength += dynamicDistanceEncoding.length; // Encoded distances
-
-		// Write the table for the case where the dynamic one is picked
 		if (!bitOutput) {
 			bitOutput.emplace(byteOutput);
 		}
-		bitOutput->addBits(isLast, 1);
-		if (dynamicLength < staticLength) {
-			// Intro
-			bitOutput->addBits(0b10, 2);
-			bitOutput->addBits(lengthsAfter256, 5);
-			bitOutput->addBits(29 - lowestDistanceWord, 5);
-			bitOutput->addBits(codeCodingTableLength - 4, 4);
 
-			// Code encoding
-			for (int i = 0; i < codeCodingTableLength; i++) {
-//				std::cout << "Writing " << int(codeEncoding.codes[codeCodingReorder[i]].length) << " for " << int(codeCodingReorder[i]) << std::endl;
-				bitOutput->addBits(codeEncoding.codes[codeCodingReorder[i]].length, 3); // Writing some bullshit here
-			}
-
-			// Code declaration
-			encodeCode(codeEncoding, dynamicWordEncoding, 257 + lengthsAfter256, 1);
-			encodeCode(codeEncoding, dynamicDistanceEncoding, lowestDistanceWord, -1);
-		} else {
-			bitOutput->addBits(0b01, 2);
+		for (int i = 0; i < std::ssize(blocks); i++) {
+			blocks[i].writeOut(*bitOutput);
 		}
-
-		// Pick the encoding
-		const HuffmanTable<286>& wordEncoding = (dynamicLength < staticLength) ? dynamicWordEncoding : staticWordEncoding;
-		const HuffmanTable<30>& distanceEncoding = (dynamicLength < staticLength) ? dynamicDistanceEncoding : staticDistanceEncoding;
-		const typename HuffmanTable<30>::Entry* distanceZero = distanceEncoding.codes.data() + 30;
-
-		// Encode the actual block
-		section.position = 0;
-		while (!section.atEnd()) {
-			bool alsoOthers = false;
-			typename std::decay_t<decltype(section)>::CodeRemainderWithLength length = {};
-			int distanceWord = 0;
-			typename std::decay_t<decltype(section)>::CodeRemainderWithLength distance = {};
-			int word = section.readWord([&] (auto lengthExtraAssigned, int distanceWordAssigned, auto distanceExtraAssigned) {
-				alsoOthers = true;
-				length = lengthExtraAssigned;
-				distanceWord = distanceWordAssigned;
-				distance = distanceExtraAssigned;
-			});
-			bitOutput->addBits(wordEncoding.codes[word].code, wordEncoding.codes[word].length);
-			if (alsoOthers) { // Hopefully this will be optimised out
-//				std::cout << "Copy " << word << " +(" << length.remainder << ": " << length.length << ") with distance " << (-1 - distanceWord) << " +(" << distance.remainder << " - " << distance.length << ")" << std::endl;
-				if (word >= 265) {
-					bitOutput->addBitsAndCrop(length.remainder, length.length);
-				}
-				bitOutput->addBits(distanceZero[distanceWord].code, distanceZero[distanceWord].length);
-				if (distanceWord < -4) {
-					bitOutput->addBitsAndCrop(distance.remainder, distance.length);
-				}
-			}
-		}
-		bitOutput->addBits(wordEncoding.codes[256].code, wordEncoding.codes[256].length); // Ending
 	}
 };
 
@@ -1649,21 +1810,21 @@ std::vector<char> readDeflateIntoVector(std::span<const uint8_t> allData) {
 	});
 }
 
-template <StreamSettings Settings, typename Checksum = NoChecksum>
+template <CompressionSettings Settings>
 std::vector<uint8_t> writeDeflateIntoVector(std::function<int(std::span<char> batch)> readMoreFunction) {
 	std::vector<uint8_t> result;
 	{
-		Detail::ByteOutput<Settings, Checksum> output;
-		Detail::HuffmanWriter<Settings, Settings> writer(output);
-		auto connector = [&] (typename Detail::DeduplicatedStream<Settings>::Section section, bool lastCall) {
+		Detail::ByteOutput<typename Settings::Output, NoChecksum> output;
+		Detail::HuffmanWriter<typename Settings::Output, typename Settings::DeduplicationProperties> writer(output);
+		auto connector = [&] (typename Detail::DeduplicatedStream<typename Settings::DeduplicationProperties>::Section section, bool lastCall) {
 			writer.writeBatch(section, lastCall);
 			return section.position;
 		};
-		Detail::ByteInput<Settings, Checksum> input([&readMoreFunction] (std::span<uint8_t> batch) {
+		Detail::ByteInput<typename Settings::Input, typename Settings::Checksum> input([&readMoreFunction] (std::span<uint8_t> batch) {
 			return readMoreFunction(std::span<char>(reinterpret_cast<char*>(batch.data()), batch.size()));
 		});
-		Detail::DeduplicatedStream<Settings> deduplicated(connector);
-		Detail::Deduplicator<Settings, Checksum, Settings> deduplicator(input, deduplicated);
+		Detail::DeduplicatedStream<typename Settings::DeduplicationProperties> deduplicated(connector);
+		Detail::Deduplicator<typename Settings::Input, typename Settings::Checksum, typename Settings::DeduplicationProperties> deduplicator(input, deduplicated);
 
 		do {
 			deduplicator.deduplicateSome();
@@ -1681,9 +1842,9 @@ std::vector<uint8_t> writeDeflateIntoVector(std::function<int(std::span<char> ba
 	return result;
 }
 
-template <StreamSettings Settings, typename Checksum = NoChecksum>
+template <CompressionSettings Settings>
 std::vector<uint8_t> writeDeflateIntoVector(std::span<const char> allData) {
-	return writeDeflateIntoVector<Settings, Checksum>([allData, position = 0] (std::span<char> toFill) mutable -> int {
+	return writeDeflateIntoVector<Settings>([allData, position = 0] (std::span<char> toFill) mutable -> int {
 		int filling = std::min(allData.size() - position, toFill.size());
 		if(filling != 0)
 			memcpy(toFill.data(), &allData[position], filling);
@@ -1808,7 +1969,7 @@ protected:
 		writeTrailer = trailerWriter;
 	}
 private:
-	Detail::HuffmanWriter<typename Settings::Output, typename Settings::DeduplicationProperties> writer = {output};
+	Detail::HuffmanWriter<typename Settings::Output, typename Settings::DeduplicationProperties, Settings::HuffmanSectionSize> writer = {output};
 	std::function<void(std::span<const char> batch)> consumeFunction;
 	Detail::DeduplicatedStream<typename Settings::DeduplicationProperties> deduplicated = {[this]
 				(typename Detail::DeduplicatedStream<typename Settings::DeduplicationProperties>::Section section, bool lastCall) {
