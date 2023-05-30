@@ -40,15 +40,6 @@ concept DecompressionSettings = std::constructible_from<typename T::Checksum> &&
 };
 
 template <typename T>
-concept CompressionSettings = std::constructible_from<typename T::Checksum> && InputStreamSettings<typename T::Input>
-			&& StreamSettings<typename T::Output> && StreamSettings<typename T::DeduplicationProperties>
-			&& requires(typename T::Checksum checksum) {
-	int(checksum());
-	int(checksum(std::span<const uint8_t>()));
-	int(T::HuffmanSectionSize);
-};
-
-template <typename T>
 concept BasicStringType = std::constructible_from<T> && requires(T value) {
 	value += 'a';
 	std::string_view(value);
@@ -193,29 +184,6 @@ struct DefaultDecompressionSettings : MinDecompressionSettings {
 	constexpr static bool verifyChecksum = true;
 };
 
-struct DefaultCompressionSettings {
-	struct Input {
-		constexpr static int maxSize = 30000;
-		constexpr static int minSize = 10000;
-		constexpr static int lookAheadSize = 300;
-	};
-	struct DeduplicationProperties {
-		constexpr static int maxSize = 50000;
-		constexpr static int minSize = 10000;
-	};
-	struct Output {
-		constexpr static int maxSize = 100000;
-		constexpr static int minSize = 0;
-	};
-
-	constexpr static int HuffmanSectionSize = 1000000;
-	using Checksum = FastCrc32;
-};
-
-struct BestCompressionSettings : DefaultCompressionSettings {
-	constexpr static int HuffmanSectionSize = 1000;
-};
-
 namespace Detail {
 
 template <typename Builder>
@@ -242,17 +210,14 @@ static constexpr std::array<uint8_t, 256> reversedBytes = ArrayFiller([] (int un
 	return uint8_t((uninverted * uint64_t(0x0202020202) & uint64_t(0x010884422010)) % 0x3ff); // Reverse a byte
 });
 
-// Provides access to input stream as chunks of contiguous data
-template <InputStreamSettings Settings, typename Checksum>
 class ByteInput {
-	static_assert(Settings::minSize < Settings::maxSize);
-	std::array<uint8_t, Settings::maxSize + Settings::lookAheadSize> buffer = {};
+	std::span<uint8_t> buffer = {};
 	std::function<int(std::span<uint8_t> batch)> readMore;
 	int position = 0;
 	int filled = 0;
 	ptrdiff_t positionStart = 0;
-	int lookAheadSize = Settings::lookAheadSize;
-	Checksum crc = {};
+	int minSize = 0;
+	int lookAheadSize = 0;
 
 	void ensureSize(int bytes) {
 		while (position + bytes + lookAheadSize > filled) [[unlikely]] {
@@ -264,7 +229,9 @@ class ByteInput {
 	}
 
 public:
-	ByteInput(std::function<int(std::span<uint8_t> batch)> readMoreFunction) : readMore(readMoreFunction) {}
+
+	ByteInput(std::span<uint8_t> buffer, std::function<int(std::span<uint8_t> batch)> readMoreFunction, int minSize, int lookAheadSize)
+		: buffer(buffer), readMore(std::move(readMoreFunction)), minSize(minSize), lookAheadSize(lookAheadSize) {}
 
 	// Note: May not get as many bytes as necessary, would need to be called multiple times
 	template <typename ByteType = uint8_t>
@@ -338,7 +305,7 @@ public:
 
 	std::span<uint8_t> startFilling() {
 		if (position + lookAheadSize >= filled) {
-			int offset = std::max(0, position - Settings::minSize);
+			int offset = std::max(0, position - minSize);
 			positionStart += offset;
 			filled -= offset;
 			memmove(buffer.data(), buffer.data() + offset, filled);
@@ -348,7 +315,7 @@ public:
 	}
 
 	int doneFilling(int added) {
-		crc(std::span<uint8_t>(reinterpret_cast<uint8_t*>(buffer.begin() + filled), added));
+		addToChecksum(std::span<uint8_t>(reinterpret_cast<uint8_t*>(buffer.data() + filled), added));
 		if (added == 0) {
 			lookAheadSize = 0;
 			return filled - position;
@@ -357,12 +324,31 @@ public:
 		return added;
 	}
 
+	template <int MaxTableSize>
+	auto encodedTable(int realSize, const std::array<uint8_t, 256>& codeCodingLookup, const std::array<uint8_t, codeCodingReorder.size()>& codeCodingLengths);
+
+protected:
+	virtual void addToChecksum(std::span<uint8_t> batch) = 0;
+};
+
+// Provides access to input stream as chunks of contiguous data
+template <InputStreamSettings Settings, typename Checksum>
+class ByteInputWithBuffer : private std::array<uint8_t, Settings::maxSize + Settings::lookAheadSize>, public ByteInput {
+	static_assert(Settings::minSize < Settings::maxSize);
+	std::array<uint8_t, Settings::maxSize + Settings::lookAheadSize> buffer = {};
+	Checksum crc = {};
+
+	void addToChecksum(std::span<uint8_t> batch) override {
+		crc(batch);
+	}
+
+public:
+	ByteInputWithBuffer(std::function<int(std::span<uint8_t> batch)> readMoreFunction)
+		: ByteInput(*this, std::move(readMoreFunction), Settings::minSize, Settings::lookAheadSize) {}
+
 	uint32_t checksum() {
 		return crc();
 	}
-
-	template <int MaxTableSize>
-	auto encodedTable(int realSize, const std::array<uint8_t, 256>& codeCodingLookup, const std::array<uint8_t, codeCodingReorder.size()>& codeCodingLengths);
 };
 
 constexpr static std::array<int, 29> lengthOffsets = {3, 4, 4, 5, 7, 8, 9, 10, 11, 13, 15,
@@ -380,9 +366,8 @@ static constexpr std::array<uint16_t, 17> upperRemovals = {0x0000, 0x0001, 0x000
 		0x01ff, 0x03ff, 0x07ff, 0x0fff, 0x1fff, 0x3fff, 0x7fff, 0xffff};
 
 // Provides optimised access to data from a ByteInput by bits
-template <ByteReader ByteInputType>
 class BitReader {
-	std::decay_t<ByteInputType>* input;
+	ByteInput* input;
 	int bitsLeft = 0;
 	uint64_t data = 0; // Invariant - lowest bit is the first valid
 	static constexpr int minimumBits = 16; // The specification doesn't require any reading by bits that are longer than 16 bits
@@ -409,7 +394,7 @@ class BitReader {
 
 public:
 
-	BitReader(ByteInputType* byteInput) : input(byteInput) {}
+	BitReader(ByteInput* byteInput) : input(byteInput) {}
 	BitReader(BitReader&& other) noexcept : input(other.input), bitsLeft(other.bitsLeft), data(other.data) {
 		other.input = nullptr;
 	}
@@ -747,9 +732,9 @@ public:
 };
 
 // Represents a table encoding Huffman codewords and can parse the stream by bits
-template <int MaxSize, typename ReaderType>
+template <int MaxSize>
 class EncodedTable {
-	ReaderType& reader;
+	BitReader& reader;
 	struct CodeIndexEntry {
 		int16_t word = 0;
 		int8_t length = 0;
@@ -764,7 +749,7 @@ class EncodedTable {
 	std::array<CodeRemainder, MaxSize> remainders = {};
 
 public:
-	EncodedTable(ReaderType& reader, int realSize, std::array<uint8_t, 256> codeCodingLookup, std::array<uint8_t, codeCodingReorder.size()> codeCodingLengths)
+	EncodedTable(BitReader& reader, int realSize, std::array<uint8_t, 256> codeCodingLookup, std::array<uint8_t, codeCodingReorder.size()> codeCodingLengths)
 	: reader(reader) {
 		std::array<int, 17> quantities = {};
 		struct CodeEntry {
@@ -907,14 +892,21 @@ public:
 	}
 };
 
-template <InputStreamSettings Settings, typename Checksum>
 template <int MaxTableSize>
-auto ByteInput<Settings, Checksum>::encodedTable(int realSize, const std::array<uint8_t, 256>& codeCodingLookup, const std::array<uint8_t, codeCodingReorder.size()>& codeCodingLengths) {
-	return EncodedTable<MaxTableSize, ByteInput<Settings, Checksum>>(*this, realSize, codeCodingLookup, codeCodingLengths);
+auto ByteInput::encodedTable(int realSize, const std::array<uint8_t, 256>& codeCodingLookup, const std::array<uint8_t, codeCodingReorder.size()>& codeCodingLengths) {
+	return EncodedTable<MaxTableSize>(*this, realSize, codeCodingLookup, codeCodingLengths);
 }
 
-template <InputStreamSettings InputSettings, typename Checksum, StreamSettings DeduplicatedSettings, int ChunkSize = 30000, int IndexLength = 31237, int IndexCount = 6, typename IndexType = uint16_t>
-class Deduplicator {
+template <typename Index>
+concept DeduplicatingSearch = requires(Index index, Detail::ByteInput& input, int distance, int length, uint64_t sequence, int offset) {
+	Index(input);
+	std::tie(distance, length) = index.locate(sequence);
+	index.moveBack(offset);
+};
+
+template <int IndexLength = 31237, int IndexCount = 6, int ChunkSize = 30000, typename IndexType = uint16_t>
+class MultiIndexBloomFilter {
+	ByteInput& input;
 
 	struct LookbackIndex {
 		std::array<IndexType, IndexLength> positions = {};
@@ -934,13 +926,54 @@ class Deduplicator {
 	});
 	static_assert(IndexCount <= 6, "We can't have longer indexes than 8 bytes with uint64_t as pseudohash");
 
+public:
+	MultiIndexBloomFilter(ByteInput& input) : input(input) {}
+
+	void moveBack(int shift) {
+		for (auto& index : lookbackIndexes)
+			index.moveBack(shift);
+	}
+
+	std::pair<IndexType, int> locate(uint64_t sequence) {
+		int position = input.getPosition() - 1;
+		IndexType location = 0;
+		int matchLength = 0;
+		for (int index = IndexCount - 1; index >= 0; index--) {
+			uint64_t trimmedSequence = sequence & lookbackIndexes[index].mask;
+			int sequenceHash = trimmedSequence % IndexLength;
+			location = lookbackIndexes[index].positions[sequenceHash];
+			if (location >= position) { // Clearly bad data
+				continue;
+			}
+			uint64_t there = input.getEightBytesAtPosition(location);
+			there &= lookbackIndexes[index].mask;
+			if (there == trimmedSequence) {
+				for (matchLength = index + 3; matchLength < maximumCopyLength; matchLength++) { // TODO: Don't go past end
+					if (input.getAtPosition(location + matchLength) != input.getAtPosition(position + matchLength)) {
+						return {location, matchLength};
+					}
+				}
+				break;
+			}
+//				std::cout << "Saving at " << sequenceHash << std::endl;
+			lookbackIndexes[index].positions[sequenceHash] = position;
+		}
+		return {position, 0};
+	}
+};
+
+template <StreamSettings DeduplicatedSettings, DeduplicatingSearch DuplicationIndex>
+class Deduplicator {
+
 	int positionStart = 0;
 
-	ByteInput<InputSettings, Checksum>& input;
+	ByteInput& input;
 	DeduplicatedStream<DeduplicatedSettings>& output;
 
+	DuplicationIndex search = {input};
+
 public:
-	Deduplicator(ByteInput<InputSettings, Checksum>& input, DeduplicatedStream<DeduplicatedSettings>& output) : input(input), output(output) {}
+	Deduplicator(ByteInput& input, DeduplicatedStream<DeduplicatedSettings>& output) : input(input), output(output) {}
 
 	void deduplicateSome() {
 		do {
@@ -950,34 +983,14 @@ public:
 			if (input.getPositionStart() != positionStart) [[unlikely]] {
 				int newStart = input.getPositionStart();
 				int shift = newStart - positionStart;
-				for (auto& index : lookbackIndexes)
-					index.moveBack(shift);
+				search.moveBack(shift);
 				positionStart = newStart;
 			}
+
 			int position = input.getPosition() - 1;
-			IndexType location = 0;
+			int location = 0;
 			int matchLength = 0;
-			for (int index = IndexCount - 1; index >= 0; index--) {
-				uint64_t trimmedSequence = sequence & lookbackIndexes[index].mask;
-				int sequenceHash = trimmedSequence % IndexLength;
-				location = lookbackIndexes[index].positions[sequenceHash];
-				if (location >= position) { // Clearly bad data
-					continue;
-				}
-				uint64_t there = input.getEightBytesAtPosition(location);
-				there &= lookbackIndexes[index].mask;
-				if (there == trimmedSequence) {
-					for (matchLength = index + 3; matchLength < maximumCopyLength; matchLength++) { // TODO: Don't go past end
-						if (input.getAtPosition(location + matchLength) != input.getAtPosition(position + matchLength)) {
-							goto matchOver; // Break from two loops
-						}
-					}
-					break;
-				}
-//				std::cout << "Saving at " << sequenceHash << std::endl;
-				lookbackIndexes[index].positions[sequenceHash] = position;
-			}
-			matchOver:; // For breaking from double loop
+			std::tie(location, matchLength) = search.locate(sequence);
 			matchLength = std::min(matchLength, input.availableAhead());
 			if (matchLength >= 3) {
 				std::string copied;
@@ -998,7 +1011,7 @@ public:
 // Higher level class handling the overall state of parsing. Implemented as a state machine to allow pausing when output is full.
 template <DecompressionSettings Settings>
 class DeflateReader {
-	ByteInput<typename Settings::Input, typename Settings::Checksum>& input;
+	ByteInput& input;
 	ByteOutput<typename Settings::Output, typename Settings::Checksum>& output;
 
 	struct CopyState {
@@ -1046,7 +1059,7 @@ class DeflateReader {
 	};
 
 	struct FixedCodeState : CopyState {
-		BitReader<std::decay_t<decltype(DeflateReader::input)>> input;
+		BitReader input;
 		FixedCodeState(decltype(input)&& input) : input(std::move(input)) {}
 
 		bool parseSome(DeflateReader* parent) {
@@ -1112,9 +1125,9 @@ class DeflateReader {
 	};
 
 	struct DynamicCodeState : CopyState {
-		BitReader<std::decay_t<decltype(DeflateReader::input)>> input;
-		EncodedTable<288, decltype(input)> codes;
-		EncodedTable<31, decltype(input)> distanceCode;
+		BitReader input;
+		EncodedTable<288> codes;
+		EncodedTable<31> distanceCode;
 
 		DynamicCodeState(decltype(input)&& inputMoved, int codeCount, int distanceCodeCount, const std::array<uint8_t, 256>& codeCodingLookup,
 						const std::array<uint8_t, codeCodingReorder.size()>& codeCodingLengths)
@@ -1169,7 +1182,7 @@ public:
 	// Returns whether there is more work to do
 	bool parseSome() {
 		while (true) {
-			BitReader<std::decay_t<decltype(input)>> bitInput(nullptr);
+			BitReader bitInput(nullptr);
 			if (LiteralState* state = std::get_if<LiteralState>(&decodingState)) {
 				if (state->parseSome(this)) {
 					return true;
@@ -1782,11 +1795,44 @@ public:
 
 } // namespace Detail
 
+template <typename T>
+concept CompressionSettings = std::constructible_from<typename T::Checksum> && InputStreamSettings<typename T::Input>
+			&& StreamSettings<typename T::Output> && StreamSettings<typename T::DeduplicationProperties>
+			 && Detail::DeduplicatingSearch<typename T::DeduplicationIndex> && requires(typename T::Checksum checksum) {
+	int(checksum());
+	int(checksum(std::span<const uint8_t>()));
+	int(T::HuffmanSectionSize);
+};
+
+struct DefaultCompressionSettings {
+	struct Input {
+		constexpr static int maxSize = 30000;
+		constexpr static int minSize = 10000;
+		constexpr static int lookAheadSize = 300;
+	};
+	struct DeduplicationProperties {
+		constexpr static int maxSize = 50000;
+		constexpr static int minSize = 10000;
+	};
+	struct Output {
+		constexpr static int maxSize = 100000;
+		constexpr static int minSize = 0;
+	};
+
+	constexpr static int HuffmanSectionSize = 1000000;
+	using Checksum = FastCrc32;
+	using DeduplicationIndex = Detail::MultiIndexBloomFilter<>;
+};
+
+struct BestCompressionSettings : DefaultCompressionSettings {
+	constexpr static int HuffmanSectionSize = 1000;
+};
+
 // Handles decompression of a deflate-compressed archive, no headers
 template <DecompressionSettings Settings = DefaultDecompressionSettings>
 std::vector<char> readDeflateIntoVector(std::function<int(std::span<uint8_t> batch)> readMoreFunction) {
 	std::vector<char> result;
-	Detail::ByteInput<typename Settings::Input, typename Settings::Checksum> input(readMoreFunction);
+	Detail::ByteInputWithBuffer<typename Settings::Input, typename Settings::Checksum> input(readMoreFunction);
 	Detail::ByteOutput<typename Settings::Output, typename Settings::Checksum> output;
 	Detail::DeflateReader<Settings> reader(input, output);
 	bool workToDo = false;
@@ -1820,11 +1866,11 @@ std::vector<uint8_t> writeDeflateIntoVector(std::function<int(std::span<char> ba
 			writer.writeBatch(section, lastCall);
 			return section.position;
 		};
-		Detail::ByteInput<typename Settings::Input, typename Settings::Checksum> input([&readMoreFunction] (std::span<uint8_t> batch) {
+		Detail::ByteInputWithBuffer<typename Settings::Input, typename Settings::Checksum> input([&readMoreFunction] (std::span<uint8_t> batch) {
 			return readMoreFunction(std::span<char>(reinterpret_cast<char*>(batch.data()), batch.size()));
 		});
 		Detail::DeduplicatedStream<typename Settings::DeduplicationProperties> deduplicated(connector);
-		Detail::Deduplicator<typename Settings::Input, typename Settings::Checksum, typename Settings::DeduplicationProperties> deduplicator(input, deduplicated);
+		Detail::Deduplicator<typename Settings::DeduplicationProperties, typename Settings::DeduplicationIndex> deduplicator(input, deduplicated);
 
 		do {
 			deduplicator.deduplicateSome();
@@ -1858,7 +1904,7 @@ std::vector<uint8_t> writeDeflateIntoVector(std::span<const char> allData) {
 template <DecompressionSettings Settings = DefaultDecompressionSettings>
 class IDeflateArchive {
 protected:
-	Detail::ByteInput<typename Settings::Input, typename Settings::Checksum> input;
+	Detail::ByteInputWithBuffer<typename Settings::Input, typename Settings::Checksum> input;
 	Detail::ByteOutput<typename Settings::Output, typename Settings::Checksum> output;
 	Detail::DeflateReader<Settings> deflateReader = {input, output};
 	bool done = false;
@@ -1961,7 +2007,7 @@ template <CompressionSettings Settings, typename Checksum = NoChecksum>
 class ODeflateArchive {
 protected:
 	Detail::ByteOutput<typename Settings::Output, NoChecksum> output;
-	Detail::ByteInput<typename Settings::Input, Checksum> input = {[this] (std::span<uint8_t>) -> int {
+	Detail::ByteInputWithBuffer<typename Settings::Input, Checksum> input = {[this] (std::span<uint8_t>) -> int {
 		return 0; // TODO: The input buffer should be able to renew from this
 	}};
 
@@ -1976,7 +2022,7 @@ private:
 		writer.writeBatch(section, lastCall);
 		return section.position;
 	}};
-	Detail::Deduplicator<typename Settings::Input, Checksum, typename Settings::DeduplicationProperties> deduplicator = {input, deduplicated};
+	Detail::Deduplicator<typename Settings::DeduplicationProperties, typename Settings::DeduplicationIndex> deduplicator = {input, deduplicated};
 
 	void consume() {
 		std::span<const char> batch = output.getBuffer();
@@ -2140,9 +2186,8 @@ struct GzFileInfo {
 		writeInteger(uint16_t(crc()));
 	}
 
-	template <StreamSettings InputSettings, typename ChecksumType>
-	GzFileInfo(Detail::ByteInput<InputSettings, ChecksumType>& input) {
-		ChecksumType checksum = {};
+	GzFileInfo(Detail::ByteInput& input) {
+		LightCrc32 checksum = {};
 		auto check = [&checksum] (auto num) -> uint32_t {
 			std::array<uint8_t, sizeof(num)> asBytes = {};
 			memcpy(asBytes.data(), &num, asBytes.size());

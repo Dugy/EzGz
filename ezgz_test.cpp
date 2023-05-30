@@ -25,9 +25,9 @@ struct SettingsWithOutputSize : EzGz::DefaultDecompressionSettings {
 };
 
 template <int MaxSize, int MinSize = 0, int LookAheadSize = sizeof(uint32_t)>
-struct InputHelper : EzGz::Detail::ByteInput<typename SettingsWithInputSize<MaxSize, MinSize, LookAheadSize>::Input, typename SettingsWithInputSize<MaxSize, MinSize, LookAheadSize>::Checksum> {
+struct InputHelper : EzGz::Detail::ByteInputWithBuffer<typename SettingsWithInputSize<MaxSize, MinSize, LookAheadSize>::Input, typename SettingsWithInputSize<MaxSize, MinSize, LookAheadSize>::Checksum> {
 	InputHelper(std::span<const uint8_t> source)
-	: EzGz::Detail::ByteInput<typename SettingsWithInputSize<MaxSize, MinSize, LookAheadSize>::Input, typename SettingsWithInputSize<MaxSize, MinSize, LookAheadSize>::Checksum>(
+	: EzGz::Detail::ByteInputWithBuffer<typename SettingsWithInputSize<MaxSize, MinSize, LookAheadSize>::Input, typename SettingsWithInputSize<MaxSize, MinSize, LookAheadSize>::Checksum>(
 				[source, position = 0] (std::span<uint8_t> toFill) mutable -> int {
 		int filling = std::min(source.size() - position, toFill.size());
 //		std::cout << "Providing " << filling << " bytes of data, " << (source.size() - position - filling) << " left" << std::endl;
@@ -399,7 +399,7 @@ int main(int, char**) {
 				5, 0, 18, 4, 17, 3, 2, 4, 5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2, 4, 5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4,
 				17, 3, 2, 4, 5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2, 4, 5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2, 4,
 				5, 0, 18, 4, 17, 3, 1, 4, 5, 0, 18, 4, 17, 3, 2};
-		EncodedTable<288, decltype(reader)> table(reader, 260, codeCodingLookup, codeCodingLengths);
+		EncodedTable<288> table(reader, 260, codeCodingLookup, codeCodingLengths);
 		reader.getBits(15);
 		reader.getBits(14);
 
@@ -549,7 +549,7 @@ int main(int, char**) {
 				1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14,
 				1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18,
 				1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18, 1, 13, 1, 17, 1, 14, 1, 18};
-		EncodedTable<288, decltype(reader)> table(reader, 270, codeCodingLookup, codeCodingLengths);
+		EncodedTable<288> table(reader, 270, codeCodingLookup, codeCodingLengths);
 
 		doATest(table.readWord(), 'R');
 		doATest(table.readWord(), 'A');
@@ -590,7 +590,7 @@ int main(int, char**) {
 		};
 		{
 			Detail::DeduplicatedStream<TestStreamSettings<10, 4>> output(checker);
-			Detail::Deduplicator<SettingsWithInputSize<50, 20, 10>::Input, NoChecksum, TestStreamSettings<10, 4>, 20, 23> deduplicator(byteReader, output);
+			Detail::Deduplicator<TestStreamSettings<10, 4>, Detail::MultiIndexBloomFilter<>> deduplicator(byteReader, output);
 			deduplicator.deduplicateSome();
 		}
 	}
@@ -602,7 +602,7 @@ int main(int, char**) {
 		DeduplicationVerifier<TestStreamSettings<12, 5>> verifier;
 		{
 			Detail::DeduplicatedStream<TestStreamSettings<12, 5>> output(verifier.reader());
-			Detail::Deduplicator<SettingsWithInputSize<40, 22, 0>::Input, NoChecksum, TestStreamSettings<12, 5>, 20, 23> deduplicator(byteReader, output);
+			Detail::Deduplicator<TestStreamSettings<12, 5>, Detail::MultiIndexBloomFilter<>> deduplicator(byteReader, output);
 			deduplicator.deduplicateSome();
 		}
 		doATest(verifier.parsed, "abaabbbabaababbaababaaaabaaabbbbbaa");
@@ -616,7 +616,7 @@ int main(int, char**) {
 		DeduplicationVerifier<TestStreamSettings<10, 4>> verifier;
 		{
 			Detail::DeduplicatedStream<TestStreamSettings<10, 4>> output(verifier.reader());
-			Detail::Deduplicator<SettingsWithInputSize<70, 20, 0>::Input, NoChecksum, TestStreamSettings<10, 4>, 20, 23> deduplicator(byteReader, output);
+			Detail::Deduplicator<TestStreamSettings<10, 4>, Detail::MultiIndexBloomFilter<>> deduplicator(byteReader, output);
 			deduplicator.deduplicateSome();
 		}
 		doATest(verifier.parsed, "The main interesting thing about it is the deflate algorithm.");
