@@ -904,7 +904,7 @@ concept DeduplicatingSearch = requires(Index index, Detail::ByteInput& input, in
 	index.moveBack(offset);
 };
 
-template <int IndexLength = 31237, int IndexCount = 6, int ChunkSize = 30000, typename IndexType = uint16_t>
+template <int IndexLength = 31237, auto IndexLengths = std::array<int, 3>{4, 6, 8}, int ChunkSize = 30000, typename IndexType = uint16_t>
 class MultiIndexBloomFilter {
 	ByteInput& input;
 
@@ -918,13 +918,21 @@ class MultiIndexBloomFilter {
 			}
 		}
 	};
-	std::array<LookbackIndex, IndexCount> lookbackIndexes = ArrayFiller([] (int index) {
+	std::array<LookbackIndex, IndexLengths.size()> lookbackIndexes = ArrayFiller([] (int index) constexpr {
 		if constexpr (std::endian::native == std::endian::little)
-			return LookbackIndex{{}, 0xffffffffffffffff >> ((5 - index) * 8)};
+			return LookbackIndex{{}, 0xffffffffffffffff >> ((8 - IndexLengths[index]) * 8)};
 		else
-			return LookbackIndex{{}, 0xffffffffffffffff << ((5 - index) * 8)};
+			return LookbackIndex{{}, 0xffffffffffffffff << ((8 - IndexLengths[index]) * 8)};
 	});
-	static_assert(IndexCount <= 6, "We can't have longer indexes than 8 bytes with uint64_t as pseudohash");
+
+	template <int Index> // Just check if we aren't indexing something that doesn't fit the numeric type
+	static bool checkIfNoneGreaterThanEight() {
+		if constexpr(Index < std::ssize(IndexLengths)) {
+			static_assert(IndexLengths[Index] <= 8, "We can't have longer indexes than 8 bytes with uint64_t as pseudohash");
+			return checkIfNoneGreaterThanEight<Index + 1>();
+		} else return true;
+	}
+	constexpr static bool noneGreaterThanEight = checkIfNoneGreaterThanEight<0>();
 
 public:
 	MultiIndexBloomFilter(ByteInput& input) : input(input) {}
@@ -938,7 +946,7 @@ public:
 		int position = input.getPosition() - 1;
 		IndexType location = 0;
 		int matchLength = 0;
-		for (int index = IndexCount - 1; index >= 0; index--) {
+		for (int index = std::ssize(IndexLengths) - 1; index >= 0; index--) {
 			uint64_t trimmedSequence = sequence & lookbackIndexes[index].mask;
 			int sequenceHash = trimmedSequence % IndexLength;
 			location = lookbackIndexes[index].positions[sequenceHash];
@@ -948,7 +956,7 @@ public:
 			uint64_t there = input.getEightBytesAtPosition(location);
 			there &= lookbackIndexes[index].mask;
 			if (there == trimmedSequence) {
-				for (matchLength = index + 3; matchLength < maximumCopyLength; matchLength++) { // TODO: Don't go past end
+				for (matchLength = IndexLengths[index]; matchLength < maximumCopyLength; matchLength++) { // TODO: Don't go past end
 					if (input.getAtPosition(location + matchLength) != input.getAtPosition(position + matchLength)) {
 						return {location, matchLength};
 					}
@@ -1404,7 +1412,7 @@ class HuffmanWriter {
 			}
 
 			int sizeIncrement = 1;
-			int capacity = 0x10000;
+			int64_t capacity = 0x10000;
 
 			std::sort(sortedCounts.begin(), sortedCounts.end(), [] (Entry first, Entry second) {
 				return first.count > second.count;

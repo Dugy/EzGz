@@ -620,7 +620,7 @@ int main(int, char**) {
 			deduplicator.deduplicateSome();
 		}
 		doATest(verifier.parsed, "The main interesting thing about it is the deflate algorithm.");
-		doATest(verifier.duplicationsFound >= 2, true);
+		doATest(verifier.duplicationsFound > 0, true);
 	}
 
 	{
