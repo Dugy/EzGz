@@ -4,6 +4,7 @@
 #include <array>
 #include <cstring>
 #include <span>
+#include <bit>
 #include <charconv>
 #include <bit>
 #include <vector>
@@ -1900,7 +1901,7 @@ public:
 			return 0;
 		}
 		memcpy(batch.data(), data.data(), copying);
-		data = std::span<const uint8_t>(data.begin() + copying, data.end());
+		data = data.subspan(copying);
 		return copying;
 	}) {}
 
@@ -1934,7 +1935,7 @@ public:
 					start = it;
 				}
 				if (*it == separator) {
-					reader(std::span<const char>(start, it));
+					reader(std::span<const char>(&*start, std::distance(start, it)));
 					wasSeparator = true;
 				}
 			}
@@ -1944,7 +1945,7 @@ public:
 			if (wasSeparator)
 				reader(std::span<const char>());
 			else
-				reader(std::span<const char>(batch.end() - keeping, batch.end()));
+				reader(std::span<const char>(&*(batch.end() - keeping), keeping));
 		}
 	}
 
