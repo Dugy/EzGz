@@ -38,11 +38,11 @@ using Span = std::span<T>;
 class Span {
 public:
     Span() : m_ptr(nullptr), m_size(0) {}
-	Span(const T* ptr, std::size_t size) : m_ptr(ptr), m_size(size) {}
-	Span(const T* begin, const T* end) : m_ptr(begin), m_size(std::distance(begin, end)) {}
+	Span(T* ptr, std::size_t size) : m_ptr(ptr), m_size(size) {}
+	Span(T* begin, T* end) : m_ptr(begin), m_size(std::distance(begin, end)) {}
 
     template <std::size_t N>
-    Span(const T(&arr)[N]) : m_ptr(arr), m_size(N) {}	
+    Span(const std::array<std::remove_const_t<T>, N>& arr) : m_ptr(arr.data()), m_size(N) {}
 
     T* data() { return m_ptr; }
     const T* data() const { return m_ptr; }
@@ -57,6 +57,13 @@ public:
 
     iterator end() { return m_ptr + m_size; }
     const_iterator end() const { return m_ptr + m_size; }
+
+    Span subspan(std::size_t offset, std::size_t count = std::size_t(-1)) const {
+        if (offset >= m_size) {
+            return Span(); // Return an empty span if offset is out of bounds
+        }
+        return Span(m_ptr + offset, std::min(count, m_size - offset));
+    }
 
     const T& operator[](std::size_t index) const { return m_ptr[index]; }
 
@@ -478,7 +485,7 @@ public:
 		// Last batch has to be handled differently
 		if (!expectsMore) [[unlikely]] {
 			Span<const char> returning = Span<const char>(buffer.data() + consumed, used - consumed);
-			checksum(Span<uint8_t>(reinterpret_cast<uint8_t*>(buffer.data() + consumed), used - consumed));
+			checksum(Span<const uint8_t>(reinterpret_cast<uint8_t*>(buffer.data() + consumed), used - consumed));
 
 			consumed = used;
 			return returning;
@@ -500,7 +507,7 @@ public:
 		consumed = used; // Make everything in the buffer available (except the data returned earlier)
 
 		// Return a next batch
-		checksum(Span<uint8_t>(reinterpret_cast<uint8_t*>(buffer.data() + bytesKept), consumed - bytesKept));
+		checksum(Span<const uint8_t>(reinterpret_cast<uint8_t*>(buffer.data() + bytesKept), consumed - bytesKept));
 		return Span<const char>(buffer.data() + bytesKept, consumed - bytesKept);
 	}
 
