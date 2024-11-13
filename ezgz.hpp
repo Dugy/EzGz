@@ -1,10 +1,21 @@
 #ifndef EZGZ_HPP
 #define EZGZ_HPP
 
+#define EZGZ_HAS_CPP20 (__cplusplus >= 202002L)
+
+#define EZGZ_HAS_CONCEPTS (__cpp_concepts >= 201907L)
+#if EZGZ_HAS_CONCEPTS
+#define EZGZ_CONCEPT(X) X
+#else
+#define EZGZ_CONCEPT(X) typename
+#endif
+
 #include <array>
 #include <cstring>
+#if EZGZ_HAS_CPP20
 #include <span>
 #include <bit>
+#endif
 #include <charconv>
 #include <vector>
 #include <numeric>
@@ -20,24 +31,107 @@
 namespace EzGz {
 
 template <typename T>
+#if EZGZ_HAS_CPP20
+using Span = std::span<T>;
+#else
+// Custom span-like class for C++17
+class Span {
+public:
+    Span() : m_ptr(nullptr), m_size(0) {}
+	Span(const T* ptr, std::size_t size) : m_ptr(ptr), m_size(size) {}
+	Span(const T* begin, const T* end) : m_ptr(begin), m_size(std::distance(begin, end)) {}
+
+    template <std::size_t N>
+    Span(const T(&arr)[N]) : m_ptr(arr), m_size(N) {}	
+
+    T* data() { return m_ptr; }
+    const T* data() const { return m_ptr; }
+
+    std::size_t size() const { return m_size; }
+ 
+    using iterator = const T*;
+    using const_iterator = const T*;
+
+    iterator begin() { return m_ptr; }
+    const_iterator begin() const { return m_ptr; }
+
+    iterator end() { return m_ptr + m_size; }
+    const_iterator end() const { return m_ptr + m_size; }
+
+    const T& operator[](std::size_t index) const { return m_ptr[index]; }
+
+private:
+    T* m_ptr;
+    std::size_t m_size;
+};
+#endif
+
+#if EZGZ_HAS_CPP20
+using std::ssize;
+#else
+template <typename T>
+auto ssize(const T& container) -> std::ptrdiff_t {
+    return static_cast<std::ptrdiff_t>(container.size());
+}
+
+// Fallback for raw arrays (e.g., T[] or T[N])
+template <typename T, std::size_t N>
+constexpr std::ptrdiff_t ssize(const T(&)[N]) {
+    return static_cast<std::ptrdiff_t>(N);
+}
+#endif
+
+#if EZGZ_HAS_CPP20
+static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little);
+constexpr bool IsBigEndian = std::endian::native == std::endian::big;
+#elif defined(_WIN32) || defined(_WIN64)
+constexpr bool IsBigEndian = false;
+#elif defined(__BYTE_ORDER__)
+constexpr bool IsBigEndian = (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__);
+#elif defined(__LITTLE_ENDIAN__)
+constexpr bool IsBigEndian = false;
+#elif defined(__BIG_ENDIAN__)
+constexpr bool IsBigEndian = true;
+#else
+// this fallback version of IsBigEndian cannot be constexpr
+struct endianDetector
+{
+private:
+	static constexpr const uint16_t value{1};
+	static constexpr const void *address{static_cast<const void *>(&value)};
+
+public:
+	static bool isBig()
+	{
+		return reinterpret_cast<const uint8_t *>(address)[0] == 0x00;
+	}
+};
+const bool IsBigEndian = endianDetector::isBig();
+#endif
+
+#if EZGZ_HAS_CONCEPTS
+template <typename T>
 concept DecompressionSettings = std::constructible_from<typename T::Checksum> && requires(typename T::Checksum checksum) {
 	int(T::maxOutputBufferSize);
 	int(T::minOutputBufferSize);
 	int(T::inputBufferSize);
 	int(checksum());
-	int(checksum(std::span<const uint8_t>()));
+	int(checksum(Span<const uint8_t>()));
 	bool(T::verifyChecksum);
 };
+#endif
 
+#if EZGZ_HAS_CONCEPTS
 template <typename T>
 concept BasicStringType = std::constructible_from<T> && requires(T value) {
 	value += 'a';
 	std::string_view(value);
 };
+#endif
 
 struct NoChecksum { // Noop
 	int operator() () { return 0; }
-	int operator() (std::span<const uint8_t>) { return 0; }
+	int operator() (Span<const uint8_t>) { return 0; }
 };
 
 struct MinDecompressionSettings {
@@ -54,7 +148,7 @@ namespace Detail {
 constexpr std::array<uint32_t, 256> generateBasicCrc32LookupTable() {
 	constexpr uint32_t reversedPolynomial = 0xedb88320;
 	std::array<uint32_t, 256> result = {};
-	for (int i = 0; i < std::ssize(result); i++) {
+	for (int i = 0; i < result.size(); i++) {
 		result[i] = i;
 		for (auto j = 0; j < 8; j++)
 			result[i] = (result[i] >> 1) ^ ((result[i] & 0x1) * reversedPolynomial);
@@ -66,7 +160,7 @@ constexpr std::array<uint32_t, 256> basicCrc32LookupTable = generateBasicCrc32Lo
 
 static constexpr std::array<uint32_t, 256> generateNextCrc32LookupTableSlice(const std::array<uint32_t, 256>& previous) {
 	std::array<uint32_t, 256> result = {};
-	for (int i = 0; i < std::ssize(result); i++) {
+	for (int i = 0; i < result.size(); i++) {
 		result[i] = (previous[i] >> 8) ^ (basicCrc32LookupTable[previous[i] & 0xff]);
 	}
 	return result;
@@ -88,7 +182,7 @@ class LightCrc32 {
 
 public:
 	uint32_t operator() () { return ~state; }
-	uint32_t operator() (std::span<const uint8_t> input) {
+	uint32_t operator() (Span<const uint8_t> input) {
 		for (auto it : input) {
 			const uint8_t tableIndex = (state ^ it);
 			state = (state >> 8) ^ Detail::basicCrc32LookupTable[tableIndex];
@@ -123,9 +217,9 @@ class FastCrc32 {
 
 public:
 	uint32_t operator() () { return ~state; }
-	uint32_t operator() (std::span<const uint8_t> input) {
+	uint32_t operator() (Span<const uint8_t> input) {
 		ptrdiff_t position = 0;
-		for ( ; position + chunkSize < std::ssize(input); position += chunkSize) {
+		for ( ; position + chunkSize < ssize(input); position += chunkSize) {
 			CodingChunk chunk;
 			memcpy(chunk.chunk.data() + sizeof(state), input.data() + position + sizeof(state), chunkSize - sizeof(state));
 			union {
@@ -133,9 +227,9 @@ public:
 				uint32_t number = 0;
 			} stateBytes;
 			stateBytes.number = state;
-			if constexpr (std::endian::native == std::endian::big) {
-				for (int i = 0; i < std::ssize(stateBytes.bytes) / 2; i++) {
-					std::swap(stateBytes.bytes[i], stateBytes.bytes[std::ssize(stateBytes.bytes) - 1 - i]);
+			if (IsBigEndian) {
+				for (int i = 0; i < ssize(stateBytes.bytes) / 2; i++) {
+					std::swap(stateBytes.bytes[i], stateBytes.bytes[ssize(stateBytes.bytes) - 1 - i]);
 				}
 			}
 			stateBytes.number ^= *reinterpret_cast<const uint32_t*>(input.data() + position);
@@ -144,7 +238,7 @@ public:
 			state = chunk.process();
 		}
 
-		for ( ; position < std::ssize(input); position++) {
+		for ( ; position < ssize(input); position++) {
 			const uint8_t tableIndex = (state ^ input[position]);
 			state = (state >> 8) ^ Detail::basicCrc32LookupTable[tableIndex];
 		}
@@ -185,19 +279,19 @@ static constexpr std::array<uint8_t, 256> reversedBytes = ArrayFiller([] (int un
 });
 
 // Provides access to input stream as chunks of contiguous data
-template <DecompressionSettings Settings>
+template <EZGZ_CONCEPT(DecompressionSettings) Settings>
 class ByteInput {
 	std::array<uint8_t, Settings::inputBufferSize + sizeof(uint32_t)> buffer = {};
-	std::function<int(std::span<uint8_t> batch)> readMore;
+	std::function<int(Span<uint8_t> batch)> readMore;
 	int position = 0;
 	int filled = 0;
 	int refillSome() {
-		if (position > std::ssize(buffer) / 2) {
+		if (position > ssize(buffer) / 2) {
 			filled -= position;
 			memmove(buffer.data(), buffer.data() + position, filled);
 			position = 0;
 		}
-		int added = readMore(std::span<uint8_t>(buffer.begin() + filled, buffer.end()));
+		int added = readMore(Span<uint8_t>(buffer.begin() + filled, buffer.end()));
 		filled += added;
 		return added;
 	}
@@ -212,10 +306,10 @@ class ByteInput {
 	}
 
 public:
-	ByteInput(std::function<int(std::span<uint8_t> batch)> readMoreFunction) : readMore(readMoreFunction) {}
+	ByteInput(std::function<int(Span<uint8_t> batch)> readMoreFunction) : readMore(readMoreFunction) {}
 
 	// Note: May not get as many bytes as necessary, would need to be called multiple times
-	std::span<const uint8_t> getRange(int size) {
+	Span<const uint8_t> getRange(int size) {
 		if (position + size >= filled) {
 			refillSome();
 		}
@@ -247,14 +341,16 @@ public:
 	auto encodedTable(int realSize, const std::array<uint8_t, 256>& codeCodingLookup, const std::array<uint8_t, codeCodingReorder.size()>& codeCodingLengths);
 };
 
+#if EZGZ_HAS_CONCEPTS
 template <typename T>
 concept ByteReader = requires(T reader) {
 	reader.returnBytes(1);
-	std::span<const uint8_t>(reader.getRange(6));
+	Span<const uint8_t>(reader.getRange(6));
 };
+#endif
 
 // Provides optimised access to data from a ByteInput by bits
-template <ByteReader ByteInputType>
+template <EZGZ_CONCEPT(ByteReader) ByteInputType>
 class BitReader {
 	ByteInputType* input;
 	int bitsLeft = 0;
@@ -263,18 +359,18 @@ class BitReader {
 
 	void refillIfNeeded() {
 		if (bitsLeft < minimumBits) {
-			std::span<const uint8_t> added = input->getRange(sizeof(data) - (minimumBits / 8));
+			Span<const uint8_t> added = input->getRange(sizeof(data) - (minimumBits / 8));
 			union {
 				std::array<uint8_t, sizeof(uint64_t)> bytes;
 				uint64_t number = 0;
 			} dataAdded;
-			if constexpr (std::endian::native == std::endian::little) {
-				memcpy(dataAdded.bytes.data(), added.data(), std::ssize(added));
-			} else if constexpr (std::endian::native == std::endian::big) {
-				for (int i = 0; i < std::ssize(added); i++) {
+			if (!IsBigEndian) {
+				memcpy(dataAdded.bytes.data(), added.data(), ssize(added));
+			} else {
+				for (int i = 0; i < ssize(added); i++) {
 					dataAdded.bytes[sizeof(data) - i] = added[i];
 				}
-			} else static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little);
+			};
 			dataAdded.number <<= bitsLeft;
 			data += dataAdded.number;
 			bitsLeft += (added.size() << 3);
@@ -359,7 +455,7 @@ public:
 };
 
 // Handles output of decompressed data, filling bytes from past bytes and chunking. Consume needs to be called to empty it
-template <DecompressionSettings Settings>
+template <EZGZ_CONCEPT(DecompressionSettings) Settings>
 class ByteOutput {
 	std::array<char, Settings::maxOutputBufferSize> buffer = {};
 	int used = 0; // Number of bytes filled in the buffer (valid data must start at index 0)
@@ -368,7 +464,7 @@ class ByteOutput {
 	typename Settings::Checksum checksum = {};
 
 	void checkSize(int added = 1) {
-		if (used + added > std::ssize(buffer)) [[unlikely]] {
+		if (used + added > ssize(buffer)) [[unlikely]] {
 			throw std::logic_error("Writing more bytes than available, probably an internal bug");
 		}
 	}
@@ -378,11 +474,11 @@ public:
 		return buffer.size() - used;
 	}
 
-	std::span<const char> consume(const int bytesToKeep = 0) {
+	Span<const char> consume(const int bytesToKeep = 0) {
 		// Last batch has to be handled differently
 		if (!expectsMore) [[unlikely]] {
-			std::span<const char> returning = std::span<const char>(buffer.data() + consumed, used - consumed);
-			checksum(std::span<uint8_t>(reinterpret_cast<uint8_t*>(buffer.data() + consumed), used - consumed));
+			Span<const char> returning = Span<const char>(buffer.data() + consumed, used - consumed);
+			checksum(Span<uint8_t>(reinterpret_cast<uint8_t*>(buffer.data() + consumed), used - consumed));
 
 			consumed = used;
 			return returning;
@@ -404,8 +500,8 @@ public:
 		consumed = used; // Make everything in the buffer available (except the data returned earlier)
 
 		// Return a next batch
-		checksum(std::span<uint8_t>(reinterpret_cast<uint8_t*>(buffer.data() + bytesKept), consumed - bytesKept));
-		return std::span<const char>(buffer.data() + bytesKept, consumed - bytesKept);
+		checksum(Span<uint8_t>(reinterpret_cast<uint8_t*>(buffer.data() + bytesKept), consumed - bytesKept));
+		return Span<const char>(buffer.data() + bytesKept, consumed - bytesKept);
 	}
 
 	void addByte(char byte) {
@@ -414,7 +510,7 @@ public:
 		used++;
 	}
 
-	void addBytes(std::span<const char> bytes) {
+	void addBytes(Span<const char> bytes) {
 		checkSize(bytes.size());
 		memcpy(buffer.data() + used, bytes.data(), bytes.size());
 		used += bytes.size();
@@ -524,7 +620,7 @@ public:
 						uint8_t firstPart = uint8_t(nextCode);
 						if (size <= 8) [[likely]] {
 							codes[i].start = reversedBytes[firstPart];
-							for (int code = codes[i].start >> (8 - size); code < std::ssize(codesIndex); code += (1 << size)) {
+							for (int code = codes[i].start >> (8 - size); code < ssize(codesIndex); code += (1 << size)) {
 								codesIndex[code].word = i;
 								codesIndex[code].length = size;
 								codesIndex[code].valid = true;
@@ -551,7 +647,7 @@ public:
 		}
 
 		// Index the longer parts
-		for (int i = 0; i < std::ssize(codes); i++) {
+		for (int i = 0; i < ssize(codes); i++) {
 			CodeEntry& code = codes[i];
 			if (code.length > 8) {
 				UnindexedEntry& unindexedEntry = unindexedEntries[code.start];
@@ -601,14 +697,14 @@ public:
 	}
 };
 
-template <DecompressionSettings Settings>
+template <EZGZ_CONCEPT(DecompressionSettings) Settings>
 template <int MaxTableSize>
 auto ByteInput<Settings>::encodedTable(int realSize, const std::array<uint8_t, 256>& codeCodingLookup, const std::array<uint8_t, codeCodingReorder.size()>& codeCodingLengths) {
 	return EncodedTable<MaxTableSize, ByteInput<Settings>>(*this, realSize, codeCodingLookup, codeCodingLengths);
 }
 
 // Higher level class handling the overall state of parsing. Implemented as a state machine to allow pausing when output is full.
-template <DecompressionSettings Settings>
+template <EZGZ_CONCEPT(DecompressionSettings) Settings>
 class DeflateReader {
 	ByteInput<Settings>& input;
 	ByteOutput<Settings>& output;
@@ -643,14 +739,14 @@ class DeflateReader {
 
 		bool parseSome(DeflateReader* parent) {
 			if (parent->output.available() > bytesLeft) {
-				std::span<const uint8_t> chunk = parent->input.getRange(bytesLeft);
-				parent->output.addBytes(std::span<const char>(reinterpret_cast<const char*>(chunk.data()), (chunk.size())));
+				Span<const uint8_t> chunk = parent->input.getRange(bytesLeft);
+				parent->output.addBytes(Span<const char>(reinterpret_cast<const char*>(chunk.data()), (chunk.size())));
 				bytesLeft -= chunk.size();
 				return (bytesLeft > 0);
 			} else {
-				std::span<const uint8_t> chunk = parent->input.getRange(parent->output.available());
+				Span<const uint8_t> chunk = parent->input.getRange(parent->output.available());
 				bytesLeft -= chunk.size();
-				parent->output.addBytes(std::span<const char>(reinterpret_cast<const char*>(chunk.data()), (chunk.size())));
+				parent->output.addBytes(Span<const char>(reinterpret_cast<const char*>(chunk.data()), (chunk.size())));
 				return true;
 			}
 		}
@@ -831,7 +927,7 @@ public:
 				std::array<uint8_t, 256> codeCodingLookup = {};
 				int nextCodeCoding = 0;
 				for (int size = 1; size <= 8; size++) {
-					for (int i = 0; i < std::ssize(codeCoding); i++)
+					for (int i = 0; i < ssize(codeCoding); i++)
 						if (codeCodingLengths[i] == size) {
 
 							for (int code = nextCodeCoding << (8 - size); code < (nextCodeCoding + 1) << (8 - size); code++) {
@@ -855,8 +951,8 @@ public:
 } // namespace Detail
 
 // Handles decompression of a deflate-compressed archive, no headers
-template <DecompressionSettings Settings = DefaultDecompressionSettings>
-std::vector<char> readDeflateIntoVector(std::function<int(std::span<uint8_t> batch)> readMoreFunction) {
+template <EZGZ_CONCEPT(DecompressionSettings) Settings = DefaultDecompressionSettings>
+std::vector<char> readDeflateIntoVector(std::function<int(Span<uint8_t> batch)> readMoreFunction) {
 	std::vector<char> result;
 	Detail::ByteInput<Settings> input(readMoreFunction);
 	Detail::ByteOutput<Settings> output;
@@ -864,15 +960,15 @@ std::vector<char> readDeflateIntoVector(std::function<int(std::span<uint8_t> bat
 	bool workToDo = false;
 	do {
 		workToDo = reader.parseSome();
-		std::span<const char> batch = output.consume();
+		Span<const char> batch = output.consume();
 		result.insert(result.end(), batch.begin(), batch.end());
 	} while (workToDo);
 	return result;
 }
 
-template <DecompressionSettings Settings = DefaultDecompressionSettings>
-std::vector<char> readDeflateIntoVector(std::span<const uint8_t> allData) {
-	return readDeflateIntoVector<Settings>([allData, position = 0] (std::span<uint8_t> toFill) mutable -> int {
+template <EZGZ_CONCEPT(DecompressionSettings) Settings = DefaultDecompressionSettings>
+std::vector<char> readDeflateIntoVector(Span<const uint8_t> allData) {
+	return readDeflateIntoVector<Settings>([allData, position = 0] (Span<uint8_t> toFill) mutable -> int {
 		int filling = std::min(allData.size() - position, toFill.size());
 		if(filling != 0)
 			memcpy(toFill.data(), &allData[position], filling);
@@ -882,7 +978,7 @@ std::vector<char> readDeflateIntoVector(std::span<const uint8_t> allData) {
 }
 
 // Handles decompression of a deflate-compressed archive, no headers
-template <DecompressionSettings Settings = DefaultDecompressionSettings>
+template <EZGZ_CONCEPT(DecompressionSettings) Settings = DefaultDecompressionSettings>
 class IDeflateArchive {
 protected:
 	Detail::ByteInput<Settings> input;
@@ -893,10 +989,10 @@ protected:
 	virtual void onFinish() {}
 
 public:
-	IDeflateArchive(std::function<int(std::span<uint8_t> batch)> readMoreFunction) : input(readMoreFunction) {}
+	IDeflateArchive(std::function<int(Span<uint8_t> batch)> readMoreFunction) : input(readMoreFunction) {}
 
 #ifndef EZGZ_NO_FILE
-	IDeflateArchive(const std::string& fileName) : input([file = std::make_shared<std::ifstream>(fileName, std::ios::binary)] (std::span<uint8_t> batch) mutable {
+	IDeflateArchive(const std::string& fileName) : input([file = std::make_shared<std::ifstream>(fileName, std::ios::binary)] (Span<uint8_t> batch) mutable {
 		if (!file->good()) {
 			throw std::runtime_error("Can't read file");
 		}
@@ -909,7 +1005,7 @@ public:
 	}) {}
 #endif
 
-	IDeflateArchive(std::span<const uint8_t> data) : input([data] (std::span<uint8_t> batch) mutable {
+	IDeflateArchive(Span<const uint8_t> data) : input([data] (Span<uint8_t> batch) mutable {
 		int copying = std::min(batch.size(), data.size());
 		if (copying == 0) {
 			throw std::runtime_error("Truncated input");
@@ -920,12 +1016,12 @@ public:
 	}) {}
 
 	// Returns whether there are more bytes to read
-	std::optional<std::span<const char>> readSome(int bytesToKeep = 0) {
+	std::optional<Span<const char>> readSome(int bytesToKeep = 0) {
 		if (done) {
 			return std::nullopt;
 		}
 		bool moreStuffToDo = deflateReader.parseSome();
-		std::span<const char> batch = output.consume(bytesToKeep);
+		Span<const char> batch = output.consume(bytesToKeep);
 		if (!moreStuffToDo) {
 			onFinish();
 			done = true;
@@ -933,20 +1029,20 @@ public:
 		return batch;
 	}
 
-	void readByLines(const std::function<void(std::span<const char>)> reader, char separator = '\n') {
+	void readByLines(const std::function<void(Span<const char>)> reader, char separator = '\n') {
 		int keeping = 0;
-		std::span<const char> batch = {};
+		Span<const char> batch = {};
 		bool wasSeparator = false;
-		while (std::optional<std::span<const char>> batchOrNot = readSome(keeping)) {
+		while (std::optional<Span<const char>> batchOrNot = readSome(keeping)) {
 			batch = *batchOrNot;
-			std::span<const char>::iterator start = batch.begin();
-			for (std::span<const char>::iterator it = start; it != batch.end(); ++it) {
+			Span<const char>::iterator start = batch.begin();
+			for (Span<const char>::iterator it = start; it != batch.end(); ++it) {
 				if (wasSeparator) {
 					wasSeparator = false;
 					start = it;
 				}
 				if (*it == separator) {
-					reader(std::span<const char>(&*start, std::distance(start, it)));
+					reader(Span<const char>(&*start, std::distance(start, it)));
 					wasSeparator = true;
 				}
 			}
@@ -954,21 +1050,21 @@ public:
 		}
 		if (keeping > 0) {
 			if (wasSeparator)
-				reader(std::span<const char>());
+				reader(Span<const char>());
 			else
-				reader(std::span<const char>(&*(batch.end() - keeping), keeping));
+				reader(Span<const char>(&*(batch.end() - keeping), keeping));
 		}
 	}
 
-	void readAll(const std::function<void(std::span<const char>)>& reader) {
-		while (std::optional<std::span<const char>> batch = readSome()) {
+	void readAll(const std::function<void(Span<const char>)>& reader) {
+		while (std::optional<Span<const char>> batch = readSome()) {
 			reader(*batch);
 		}
 	}
 
 	std::vector<char> readAll() {
 		std::vector<char> returned;
-		while (std::optional<std::span<const char>> batch = readSome()) {
+		while (std::optional<Span<const char>> batch = readSome()) {
 			returned.insert(returned.end(), batch->begin(), batch->end());
 		};
 		return returned;
@@ -982,7 +1078,7 @@ enum class CreatingOperatingSystem {
 };
 
 // File information in the .gz file
-template <BasicStringType StringType>
+template <EZGZ_CONCEPT(BasicStringType) StringType>
 struct IGzFileInfo {
 	int32_t modificationTime = 0;
 	CreatingOperatingSystem operatingSystem = CreatingOperatingSystem::OTHER;
@@ -993,7 +1089,7 @@ struct IGzFileInfo {
 	StringType comment;
 	bool probablyText = false;
 
-	template <DecompressionSettings Settings>
+	template <EZGZ_CONCEPT(DecompressionSettings) Settings>
 	IGzFileInfo(Detail::ByteInput<Settings>& input) {
 		typename Settings::Checksum checksum = {};
 		auto check = [&checksum] (auto num) -> uint32_t {
@@ -1032,7 +1128,7 @@ struct IGzFileInfo {
 			int readSoFar = 0;
 			extraData.emplace();
 			while (readSoFar < extraHeaderSize) {
-				std::span<const uint8_t> taken = input.getRange(extraHeaderSize - readSoFar);
+				Span<const uint8_t> taken = input.getRange(extraHeaderSize - readSoFar);
 				checksum(taken);
 				extraData->insert(extraData->end(), taken.begin(), taken.end());
 				readSoFar += taken.size();
@@ -1070,7 +1166,7 @@ struct IGzFileInfo {
 };
 
 // Parses a .gz file, only takes care of the header, the rest is handled by its parent class IDeflateArchive
-template <DecompressionSettings Settings = DefaultDecompressionSettings>
+template <EZGZ_CONCEPT(DecompressionSettings) Settings = DefaultDecompressionSettings>
 class IGzFile : public IDeflateArchive<Settings> {
 	IGzFileInfo<typename Settings::StringType> parsedHeader;
 	using Deflate = IDeflateArchive<Settings>;
@@ -1085,9 +1181,9 @@ class IGzFile : public IDeflateArchive<Settings> {
 	}
 
 public:
-	IGzFile(std::function<int(std::span<uint8_t> batch)> readMoreFunction) : Deflate(readMoreFunction), parsedHeader(Deflate::input) {}
+	IGzFile(std::function<int(Span<uint8_t> batch)> readMoreFunction) : Deflate(readMoreFunction), parsedHeader(Deflate::input) {}
 	IGzFile(const std::string& fileName) : Deflate(fileName), parsedHeader(Deflate::input) {}
-	IGzFile(std::span<const uint8_t> data) : Deflate(data), parsedHeader(Deflate::input) {}
+	IGzFile(Span<const uint8_t> data) : Deflate(data), parsedHeader(Deflate::input) {}
 
 	const IGzFileInfo<typename Settings::StringType>& info() const {
 		return parsedHeader;
@@ -1095,7 +1191,7 @@ public:
 };
 
 namespace Detail {
-template <DecompressionSettings Settings = DefaultDecompressionSettings>
+template <EZGZ_CONCEPT(DecompressionSettings) Settings = DefaultDecompressionSettings>
 class IGzStreamBuffer : public std::streambuf {
 	IGzFile<Settings> inputFile;
 	int bytesToKeep = 10;
@@ -1105,7 +1201,7 @@ public:
 	IGzStreamBuffer(const Arg& arg, int bytesToKeep) : inputFile(arg), bytesToKeep(bytesToKeep) {}
 
 	int underflow() override {
-		std::optional<std::span<const char>> batch = inputFile.readSome(bytesToKeep);
+		std::optional<Span<const char>> batch = inputFile.readSome(bytesToKeep);
 		if (batch.has_value()) {
 			// We have to believe std::istream that it won't edit the data, otherwise it would be necessary to copy the data
 			char* start = const_cast<char*>(batch->data());
@@ -1124,7 +1220,7 @@ public:
 }
 
 // Using IGzFile as std::istream, configurable
-template <DecompressionSettings Settings = DefaultDecompressionSettings>
+template <EZGZ_CONCEPT(DecompressionSettings) Settings = DefaultDecompressionSettings>
 class BasicIGzStream : private Detail::IGzStreamBuffer<Settings>, public std::istream
 {
 public:
@@ -1133,11 +1229,11 @@ public:
 	BasicIGzStream(const std::string& sourceFile, int bytesToKeep = 10) : Detail::IGzStreamBuffer<Settings>(sourceFile, bytesToKeep), std::istream(this) {}
 #endif
 	// Read from a buffer
-	BasicIGzStream(std::span<const uint8_t> data, int bytesToKeep = 10) : Detail::IGzStreamBuffer<Settings>(data, bytesToKeep),  std::istream(this) {}
+	BasicIGzStream(Span<const uint8_t> data, int bytesToKeep = 10) : Detail::IGzStreamBuffer<Settings>(data, bytesToKeep),  std::istream(this) {}
 	// Use a function that fills a buffer of data and returns how many bytes it wrote
-	BasicIGzStream(std::function<int(std::span<uint8_t> batch)> readMoreFunction, int bytesToKeep = 10) : Detail::IGzStreamBuffer<Settings>(readMoreFunction, bytesToKeep), std::istream(this) {}
+	BasicIGzStream(std::function<int(Span<uint8_t> batch)> readMoreFunction, int bytesToKeep = 10) : Detail::IGzStreamBuffer<Settings>(readMoreFunction, bytesToKeep), std::istream(this) {}
 	// Read from an existing stream
-	BasicIGzStream(std::istream& input, int bytesToKeep = 10) : Detail::IGzStreamBuffer<Settings>([&input] (std::span<uint8_t> batch) -> int {
+	BasicIGzStream(std::istream& input, int bytesToKeep = 10) : Detail::IGzStreamBuffer<Settings>([&input] (Span<uint8_t> batch) -> int {
 		input.read(reinterpret_cast<char*>(batch.data()), batch.size());
 		return input.gcount();
 	}, bytesToKeep), std::istream(this) {}
