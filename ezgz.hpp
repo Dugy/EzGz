@@ -4,6 +4,7 @@
 #include <array>
 #include <cstring>
 #include <span>
+#include <bit>
 #include <charconv>
 #include <vector>
 #include <numeric>
@@ -675,13 +676,13 @@ class DeflateReader {
 				if (oneByte < 0b00000010) {
 					return CodeEntry{7, 256};
 				} else if (oneByte < 0b00110000) {
-					return CodeEntry{7, (oneByte >> 1) - 1 + 257};
+					return CodeEntry{7, static_cast<int16_t>((oneByte >> 1) - 1 + 257)};
 				} else if (oneByte < 0b11000000) {
-					return CodeEntry{8, oneByte - 0b00110000};
+					return CodeEntry{8, static_cast<int16_t>(oneByte - 0b00110000)};
 				} else if (oneByte < 0b11001000) {
-					return CodeEntry{8, oneByte - 0b11000000 + 280};
+					return CodeEntry{8, static_cast<int16_t>(oneByte - 0b11000000 + 280)};
 				} else {
-					return CodeEntry{8, oneByte - 0b11001000 + 144};
+					return CodeEntry{8, static_cast<int16_t>(oneByte - 0b11001000 + 144)};
 				}
 			});
 
@@ -914,7 +915,7 @@ public:
 			throw std::runtime_error("Truncated input");
 		}
 		memcpy(batch.data(), data.data(), copying);
-		data = std::span<const uint8_t>(data.begin() + copying, data.end());
+		data = data.subspan(copying);
 		return copying;
 	}) {}
 
@@ -945,7 +946,7 @@ public:
 					start = it;
 				}
 				if (*it == separator) {
-					reader(std::span<const char>(start, it));
+					reader(std::span<const char>(&*start, std::distance(start, it)));
 					wasSeparator = true;
 				}
 			}
@@ -955,7 +956,7 @@ public:
 			if (wasSeparator)
 				reader(std::span<const char>());
 			else
-				reader(std::span<const char>(batch.end() - keeping, batch.end()));
+				reader(std::span<const char>(&*(batch.end() - keeping), keeping));
 		}
 	}
 
