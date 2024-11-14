@@ -31,9 +31,10 @@ template <typename T>
 class span {
 public:
     span() : m_ptr(nullptr), m_size(0) {}
-	span(T* ptr, std::size_t size) : m_ptr(ptr), m_size(size) {}
-	span(T* begin, T* end) : m_ptr(begin), m_size(std::distance(begin, end)) {}
-
+    span(T* ptr, std::size_t size) : m_ptr(ptr), m_size(size) {}
+    span(T* begin, T* end) : m_ptr(begin), m_size(std::distance(begin, end)) {}
+    template <typename It>
+    span(It begin, It end) : m_ptr(&(*begin)), m_size(std::distance(begin, end)) {}
     template <std::size_t N>
     span(const std::array<std::remove_const_t<T>, N>& arr) : m_ptr(arr.data()), m_size(N) {}
 
