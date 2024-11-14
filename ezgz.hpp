@@ -1,10 +1,16 @@
 #ifndef EZGZ_HPP
 #define EZGZ_HPP
 
+#define EZGZ_HAS_CPP20 (__cplusplus >= 202002L)
+
+#define EZGZ_HAS_CONCEPTS (__cpp_concepts >= 201907L)
+
 #include <array>
 #include <cstring>
+#if EZGZ_HAS_CPP20
 #include <span>
 #include <bit>
+#endif
 #include <charconv>
 #include <vector>
 #include <numeric>
@@ -17,8 +23,81 @@
 #include <fstream>
 #endif
 
+#if ! EZGZ_HAS_CPP20
+namespace std {
+
+// Custom span-like class for C++17
+template <typename T>
+class span {
+public:
+    span() : m_ptr(nullptr), m_size(0) {}
+    span(T* ptr, std::size_t size) : m_ptr(ptr), m_size(size) {}
+    span(T* begin, T* end) : m_ptr(begin), m_size(std::distance(begin, end)) {}
+    template <typename It>
+    span(It begin, It end) : m_ptr(&(*begin)), m_size(std::distance(begin, end)) {}
+    template <std::size_t N>
+    span(const std::array<std::remove_const_t<T>, N>& arr) : m_ptr(arr.data()), m_size(N) {}
+
+    T* data() { return m_ptr; }
+    const T* data() const { return m_ptr; }
+
+    std::size_t size() const { return m_size; }
+ 
+    using iterator = const T*;
+    using const_iterator = const T*;
+
+    iterator begin() { return m_ptr; }
+    const_iterator begin() const { return m_ptr; }
+
+    iterator end() { return m_ptr + m_size; }
+    const_iterator end() const { return m_ptr + m_size; }
+
+    span subspan(std::size_t offset, std::size_t count = std::size_t(-1)) const {
+        if (offset >= m_size) {
+            return span(); // Return an empty span if offset is out of bounds
+        }
+        return span(m_ptr + offset, std::min(count, m_size - offset));
+    }
+
+    const T& operator[](std::size_t index) const { return m_ptr[index]; }
+
+private:
+    T* m_ptr;
+    std::size_t m_size;
+};
+
+template <typename T>
+constexpr auto ssize(const T& container) -> std::ptrdiff_t {
+    return static_cast<std::ptrdiff_t>(container.size());
+}
+
+// Fallback for raw arrays (e.g., T[] or T[N])
+template <typename T, std::size_t N>
+constexpr std::ptrdiff_t ssize(const T(&)[N]) {
+    return static_cast<std::ptrdiff_t>(N);
+}
+
+} // end namespace std
+#endif // ! EZGZ_HAS_CPP20
+
 namespace EzGz {
 
+#if EZGZ_HAS_CPP20
+static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little);
+constexpr bool IsBigEndian = std::endian::native == std::endian::big;
+#elif defined(_WIN32) || defined(_WIN64)
+constexpr bool IsBigEndian = false;
+#elif defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__)
+constexpr bool IsBigEndian = (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__);
+#elif defined(__LITTLE_ENDIAN__)
+constexpr bool IsBigEndian = false;
+#elif defined(__BIG_ENDIAN__)
+constexpr bool IsBigEndian = true;
+#else
+static_assert(false, "compiler does not support endian check");
+#endif
+
+#if EZGZ_HAS_CONCEPTS
 template <typename T>
 concept DecompressionSettings = std::constructible_from<typename T::Checksum> && requires(typename T::Checksum checksum) {
 	int(T::maxOutputBufferSize);
@@ -28,12 +107,19 @@ concept DecompressionSettings = std::constructible_from<typename T::Checksum> &&
 	int(checksum(std::span<const uint8_t>()));
 	bool(T::verifyChecksum);
 };
+#else
+#define DecompressionSettings typename
+#endif
 
+#if EZGZ_HAS_CONCEPTS
 template <typename T>
 concept BasicStringType = std::constructible_from<T> && requires(T value) {
 	value += 'a';
 	std::string_view(value);
 };
+#else
+#define BasicStringType typename
+#endif
 
 struct NoChecksum { // Noop
 	int operator() () { return 0; }
@@ -133,7 +219,7 @@ public:
 				uint32_t number = 0;
 			} stateBytes;
 			stateBytes.number = state;
-			if constexpr (std::endian::native == std::endian::big) {
+			if constexpr (IsBigEndian) {
 				for (int i = 0; i < std::ssize(stateBytes.bytes) / 2; i++) {
 					std::swap(stateBytes.bytes[i], stateBytes.bytes[std::ssize(stateBytes.bytes) - 1 - i]);
 				}
@@ -247,11 +333,15 @@ public:
 	auto encodedTable(int realSize, const std::array<uint8_t, 256>& codeCodingLookup, const std::array<uint8_t, codeCodingReorder.size()>& codeCodingLengths);
 };
 
+#if EZGZ_HAS_CONCEPTS
 template <typename T>
 concept ByteReader = requires(T reader) {
 	reader.returnBytes(1);
 	std::span<const uint8_t>(reader.getRange(6));
 };
+#else
+#define ByteReader typename
+#endif
 
 // Provides optimised access to data from a ByteInput by bits
 template <ByteReader ByteInputType>
@@ -268,13 +358,13 @@ class BitReader {
 				std::array<uint8_t, sizeof(uint64_t)> bytes;
 				uint64_t number = 0;
 			} dataAdded;
-			if constexpr (std::endian::native == std::endian::little) {
+			if constexpr (!IsBigEndian) {
 				memcpy(dataAdded.bytes.data(), added.data(), std::ssize(added));
-			} else if constexpr (std::endian::native == std::endian::big) {
+			} else {
 				for (int i = 0; i < std::ssize(added); i++) {
 					dataAdded.bytes[sizeof(data) - i] = added[i];
 				}
-			} else static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little);
+			};
 			dataAdded.number <<= bitsLeft;
 			data += dataAdded.number;
 			bitsLeft += (added.size() << 3);
@@ -382,7 +472,7 @@ public:
 		// Last batch has to be handled differently
 		if (!expectsMore) [[unlikely]] {
 			std::span<const char> returning = std::span<const char>(buffer.data() + consumed, used - consumed);
-			checksum(std::span<uint8_t>(reinterpret_cast<uint8_t*>(buffer.data() + consumed), used - consumed));
+			checksum(std::span<const uint8_t>(reinterpret_cast<uint8_t*>(buffer.data() + consumed), used - consumed));
 
 			consumed = used;
 			return returning;
@@ -404,7 +494,7 @@ public:
 		consumed = used; // Make everything in the buffer available (except the data returned earlier)
 
 		// Return a next batch
-		checksum(std::span<uint8_t>(reinterpret_cast<uint8_t*>(buffer.data() + bytesKept), consumed - bytesKept));
+		checksum(std::span<const uint8_t>(reinterpret_cast<uint8_t*>(buffer.data() + bytesKept), consumed - bytesKept));
 		return std::span<const char>(buffer.data() + bytesKept, consumed - bytesKept);
 	}
 
@@ -1149,5 +1239,11 @@ public:
 using IGzStream = BasicIGzStream<>;
 
 } // namespace EzGz
+
+#if ! EZGZ_HAS_CONCEPTS
+#undef DecompressionSettings
+#undef BasicStringType
+#undef ByteReader
+#endif
 
 #endif // EZGZ_HPP
