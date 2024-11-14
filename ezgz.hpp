@@ -1,8 +1,12 @@
 #ifndef EZGZ_HPP
 #define EZGZ_HPP
 
-#define EZGZ_HAS_CPP20 (__cplusplus >= 202002L)
+#if defined(_MSC_VER)
+static_assert(_MSVC_LANG == __cplusplus, "MSVC requires /Zc:__cplusplus for correct __cplusplus macro value");
+#endif
+static_assert(__cplusplus >= 201703L, "C++17 or higher is required");
 
+#define EZGZ_HAS_CPP20 (__cplusplus >= 202002L)
 #define EZGZ_HAS_CONCEPTS (__cpp_concepts >= 201907L)
 
 #include <array>
