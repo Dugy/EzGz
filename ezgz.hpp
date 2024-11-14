@@ -93,20 +93,7 @@ constexpr bool IsBigEndian = false;
 #elif defined(__BIG_ENDIAN__)
 constexpr bool IsBigEndian = true;
 #else
-// this fallback version of IsBigEndian cannot be constexpr
-struct endianDetector
-{
-private:
-	static constexpr const uint16_t value{1};
-	static constexpr const void *address{static_cast<const void *>(&value)};
-
-public:
-	static bool isBig()
-	{
-		return reinterpret_cast<const uint8_t *>(address)[0] == 0x00;
-	}
-};
-const bool IsBigEndian = endianDetector::isBig();
+static_assert(false, "compiler does not support endian check");
 #endif
 
 #if EZGZ_HAS_CONCEPTS
@@ -231,7 +218,7 @@ public:
 				uint32_t number = 0;
 			} stateBytes;
 			stateBytes.number = state;
-			if (IsBigEndian) {
+			if constexpr (IsBigEndian) {
 				for (int i = 0; i < std::ssize(stateBytes.bytes) / 2; i++) {
 					std::swap(stateBytes.bytes[i], stateBytes.bytes[std::ssize(stateBytes.bytes) - 1 - i]);
 				}
@@ -370,7 +357,7 @@ class BitReader {
 				std::array<uint8_t, sizeof(uint64_t)> bytes;
 				uint64_t number = 0;
 			} dataAdded;
-			if (!IsBigEndian) {
+			if constexpr (!IsBigEndian) {
 				memcpy(dataAdded.bytes.data(), added.data(), std::ssize(added));
 			} else {
 				for (int i = 0; i < std::ssize(added); i++) {
