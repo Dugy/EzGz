@@ -66,7 +66,7 @@ private:
 };
 
 template <typename T>
-auto ssize(const T& container) -> std::ptrdiff_t {
+constexpr auto ssize(const T& container) -> std::ptrdiff_t {
     return static_cast<std::ptrdiff_t>(container.size());
 }
 
@@ -139,7 +139,7 @@ namespace Detail {
 constexpr std::array<uint32_t, 256> generateBasicCrc32LookupTable() {
 	constexpr uint32_t reversedPolynomial = 0xedb88320;
 	std::array<uint32_t, 256> result = {};
-	for (int i = 0; i < result.size(); i++) {
+	for (int i = 0; i < std::ssize(result); i++) {
 		result[i] = i;
 		for (auto j = 0; j < 8; j++)
 			result[i] = (result[i] >> 1) ^ ((result[i] & 0x1) * reversedPolynomial);
@@ -151,7 +151,7 @@ constexpr std::array<uint32_t, 256> basicCrc32LookupTable = generateBasicCrc32Lo
 
 static constexpr std::array<uint32_t, 256> generateNextCrc32LookupTableSlice(const std::array<uint32_t, 256>& previous) {
 	std::array<uint32_t, 256> result = {};
-	for (int i = 0; i < result.size(); i++) {
+	for (int i = 0; i < std::ssize(result); i++) {
 		result[i] = (previous[i] >> 8) ^ (basicCrc32LookupTable[previous[i] & 0xff]);
 	}
 	return result;
