@@ -2,7 +2,7 @@
 A single header library for easily and quickly decompressing Gz archives, written in modern C++. It's designed to be both easy to use and highly performant.
 
 ## Installation
-Just add `ezgz.hpp` into your project, it contains all the functionality and depends only on the C++20 standard library. You can use git subtree to get updates cleanly.
+Just add `ezgz.hpp` into your project, it contains all the functionality and depends only on the C++20 standard library (it will also run on C++17). You can use git subtree to get updates cleanly.
 
 ## Usage
 ### Decompression
