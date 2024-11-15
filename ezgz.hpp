@@ -807,7 +807,7 @@ class DeflateReader {
 					if (code.code < 144) {
 						parent->output.addByte(static_cast<char>(code.code));
 					} else {
-						uint8_t full = ((code.code - 144)) << 1 + 144 + input.getBits(1);
+						uint8_t full = static_cast<uint8_t>(((code.code - 144) << 1) + 144 + input.getBits(1));
 						parent->output.addByte(full);
 					}
 				}
