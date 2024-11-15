@@ -4,6 +4,11 @@
 #include <filesystem>
 #include <chrono>
 
+#ifdef _WIN32
+#include <basetsd.h>
+typedef SSIZE_T ssize_t;
+#endif
+
 // For testing purposes only, gunzip is faster because it can write into files much more efficiently
 
 int main(int argc, char** argv) {
