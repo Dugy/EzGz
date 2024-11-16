@@ -38,7 +38,9 @@ public:
     span(T* ptr, std::size_t size) : m_ptr(ptr), m_size(size) {}
     span(T* begin, T* end) : m_ptr(begin), m_size(std::distance(begin, end)) {}
     template <typename It>
-    span(It begin, It end) : m_ptr(&(*begin)), m_size(std::distance(begin, end)) {}
+    span(It begin, It end) :
+			m_ptr(begin == end ? nullptr : &(*begin)),
+			m_size(std::distance(begin, end)) {}
     template <std::size_t N>
     span(const std::array<std::remove_const_t<T>, N>& arr) : m_ptr(arr.data()), m_size(N) {}
 
@@ -180,7 +182,7 @@ public:
 	uint32_t operator() () { return ~state; }
 	uint32_t operator() (std::span<const uint8_t> input) {
 		for (auto it : input) {
-			const uint8_t tableIndex = (state ^ it);
+			const uint8_t tableIndex = uint8_t(state ^ it);
 			state = (state >> 8) ^ Detail::basicCrc32LookupTable[tableIndex];
 		}
 		return ~state; // Invert all bits at the end
@@ -235,7 +237,7 @@ public:
 		}
 
 		for ( ; position < std::ssize(input); position++) {
-			const uint8_t tableIndex = (state ^ input[position]);
+			const uint8_t tableIndex = uint8_t(state ^ input[position]);
 			state = (state >> 8) ^ Detail::basicCrc32LookupTable[tableIndex];
 		}
 		return ~state; // Invert all bits at the end
@@ -310,7 +312,7 @@ public:
 			refillSome();
 		}
 		ptrdiff_t start = position;
-		int available = std::min<int>(size, filled - start);
+		int available = std::min<int>(size, filled - int(start));
 		position += available;
 		return {buffer.begin() + start, buffer.begin() + start + available};
 	}
@@ -320,7 +322,7 @@ public:
 	}
 
 	template <typename IntType>
-	uint64_t getInteger(int bytes = sizeof(IntType)) {
+	IntType getInteger(int bytes = sizeof(IntType)) {
 		IntType result = 0;
 		ensureSize(bytes);
 		memcpy(&result, &buffer[position], bytes);
@@ -371,7 +373,7 @@ class BitReader {
 			};
 			dataAdded.number <<= bitsLeft;
 			data += dataAdded.number;
-			bitsLeft += (added.size() << 3);
+			bitsLeft += int(added.size() << 3);
 		}
 	}
 
@@ -406,7 +408,7 @@ public:
 		if (bitsLeft < amount) [[unlikely]] {
 			throw std::runtime_error("Run out of data");
 		}
-		uint16_t result = data;
+		uint16_t result = uint16_t(data);
 		data >>= amount;
 		bitsLeft -= amount;
 		result &= upperRemovals[amount];
@@ -417,7 +419,7 @@ public:
 	template <typename ReadAndTellHowMuchToConsume>
 	void peekAByteAndConsumeSome(const ReadAndTellHowMuchToConsume& readAndTellHowMuchToConsume) {
 		refillIfNeeded();
-		uint8_t pulled = data;
+		uint8_t pulled = uint8_t(data);
 		auto consumed = readAndTellHowMuchToConsume(pulled);
 		if (bitsLeft < consumed) [[unlikely]] {
 			throw std::runtime_error("Run out of data");
@@ -469,7 +471,7 @@ class ByteOutput {
 
 public:
 	int available() {
-		return buffer.size() - used;
+		return int(buffer.size() - used);
 	}
 
 	std::span<const char> consume(const int bytesToKeep = 0) {
@@ -509,9 +511,9 @@ public:
 	}
 
 	void addBytes(std::span<const char> bytes) {
-		checkSize(bytes.size());
+		checkSize(int(bytes.size()));
 		memcpy(buffer.data() + used, bytes.data(), bytes.size());
-		used += bytes.size();
+		used += int(bytes.size());
 	}
 
 	void repeatSequence(int length, int distance) {
@@ -573,7 +575,7 @@ public:
 				return codeCodingLengths[length];
 			});
 			if (length < 16) {
-				codes[i].length = length;
+				codes[i].length = uint8_t(length);
 				i++;
 				quantities[length]++;
 			} else if (length == 16) {
@@ -619,8 +621,8 @@ public:
 						if (size <= 8) [[likely]] {
 							codes[i].start = reversedBytes[firstPart];
 							for (int code = codes[i].start >> (8 - size); code < std::ssize(codesIndex); code += (1 << size)) {
-								codesIndex[code].word = i;
-								codesIndex[code].length = size;
+								codesIndex[code].word = int16_t(i);
+								codesIndex[code].length = int8_t(size);
 								codesIndex[code].valid = true;
 							}
 						} else {
@@ -650,11 +652,11 @@ public:
 			if (code.length > 8) {
 				UnindexedEntry& unindexedEntry = unindexedEntries[code.start];
 				CodeRemainder& remainder = remainders[unindexedEntry.startIndex + unindexedEntry.filled];
-				codesIndex[code.start].word = MaxSize + unindexedEntry.startIndex;
+				codesIndex[code.start].word = int16_t(MaxSize + unindexedEntry.startIndex);
 				unindexedEntry.filled++;
 				remainder.remainder = code.ending; // The upper bits are cut
 				remainder.bitsLeft = code.length - 8;
-				remainder.index = i;
+				remainder.index = uint16_t(i);
 				if (unindexedEntry.filled == unindexedEntry.quantity)
 					remainder.index |= 0x8000;
 			}
@@ -727,8 +729,8 @@ class DeflateReader {
 	struct LiteralState {
 		int bytesLeft = 0;
 		LiteralState(DeflateReader* parent) {
-			int length = parent->input.getBytes(2);
-			int antiLength = parent->input.getBytes(2);
+			int length = int(parent->input.getBytes(2));
+			int antiLength = int(parent->input.getBytes(2));
 			if ((~length & 0xffff) != antiLength) {
 				throw std::runtime_error("Corrupted data, inverted length of literal block is mismatching");
 			}
@@ -739,11 +741,11 @@ class DeflateReader {
 			if (parent->output.available() > bytesLeft) {
 				std::span<const uint8_t> chunk = parent->input.getRange(bytesLeft);
 				parent->output.addBytes(std::span<const char>(reinterpret_cast<const char*>(chunk.data()), (chunk.size())));
-				bytesLeft -= chunk.size();
+				bytesLeft -= int(chunk.size());
 				return (bytesLeft > 0);
 			} else {
 				std::span<const uint8_t> chunk = parent->input.getRange(parent->output.available());
-				bytesLeft -= chunk.size();
+				bytesLeft -= int16_t(chunk.size());
 				parent->output.addBytes(std::span<const char>(reinterpret_cast<const char*>(chunk.data()), (chunk.size())));
 				return true;
 			}
@@ -805,9 +807,9 @@ class DeflateReader {
 					CopyState::copy(parent->output, length, distance);
 				} else {
 					if (code.code < 144) {
-						parent->output.addByte(code.code);
+						parent->output.addByte(char(code.code));
 					} else {
-						uint8_t full = ((code.code - 144)) << 1 + 144 + input.getBits(1);
+						uint8_t full = uint8_t(((code.code - 144) << 1) + 144 + input.getBits(1));
 						parent->output.addByte(full);
 					}
 				}
@@ -838,7 +840,7 @@ class DeflateReader {
 				int word = codes.readWord();
 
 				if (word < 256) {
-					parent->output.addByte(word);
+					parent->output.addByte(char(word));
 				} else if (word == 256) [[unlikely]] {
 					break;
 				} else {
@@ -867,21 +869,21 @@ public:
 	bool parseSome() {
 		while (true) {
 			BitReader<ByteInput<Settings>> bitInput(nullptr);
-			if (LiteralState* state = std::get_if<LiteralState>(&decodingState)) {
-				if (state->parseSome(this)) {
+			if (LiteralState* literalState = std::get_if<LiteralState>(&decodingState)) {
+				if (literalState->parseSome(this)) {
 					return true;
 				}
 				bitInput = BitReader<ByteInput<Settings>>(&input);
-			} else if (FixedCodeState* state = std::get_if<FixedCodeState>(&decodingState)) {
-				if (state->parseSome(this)) {
+			} else if (FixedCodeState* fixedCodeState = std::get_if<FixedCodeState>(&decodingState)) {
+				if (fixedCodeState->parseSome(this)) {
 					return true;
 				}
-				bitInput = std::move(state->input);
-			} else if (DynamicCodeState* state = std::get_if<DynamicCodeState>(&decodingState)) {
-				if (state->parseSome(this)) {
+				bitInput = std::move(fixedCodeState->input);
+			} else if (DynamicCodeState* dynamicCodeState = std::get_if<DynamicCodeState>(&decodingState)) {
+				if (dynamicCodeState->parseSome(this)) {
 					return true;
 				}
-				bitInput = std::move(state->input);
+				bitInput = std::move(dynamicCodeState->input);
 			} else {
 				bitInput = BitReader<ByteInput<Settings>>(&input);
 			}
@@ -917,7 +919,7 @@ public:
 				// Read Huffman code lengths
 				std::array<uint8_t, codeCodingReorder.size()> codeCodingLengths = {};
 				for (int i = 0; i < codeLengthCount; i++) {
-					codeCodingLengths[codeCodingReorder[i]] = bitInput.getBits(3);
+					codeCodingLengths[codeCodingReorder[i]] = uint8_t(bitInput.getBits(3));
 				}
 
 				// Generate Huffman codes for lengths
@@ -929,7 +931,7 @@ public:
 						if (codeCodingLengths[i] == size) {
 
 							for (int code = nextCodeCoding << (8 - size); code < (nextCodeCoding + 1) << (8 - size); code++) {
-								codeCodingLookup[reversedBytes[code]] = i;
+								codeCodingLookup[reversedBytes[code]] = uint8_t(i);
 							}
 							codeCoding[i] = reversedBytes[nextCodeCoding];
 
@@ -967,7 +969,7 @@ std::vector<char> readDeflateIntoVector(std::function<int(std::span<uint8_t> bat
 template <DecompressionSettings Settings = DefaultDecompressionSettings>
 std::vector<char> readDeflateIntoVector(std::span<const uint8_t> allData) {
 	return readDeflateIntoVector<Settings>([allData, position = 0] (std::span<uint8_t> toFill) mutable -> int {
-		int filling = std::min(allData.size() - position, toFill.size());
+		int filling = int(std::min(allData.size() - position, toFill.size()));
 		if(filling != 0)
 			memcpy(toFill.data(), &allData[position], filling);
 		position += filling;
@@ -995,7 +997,7 @@ public:
 			throw std::runtime_error("Can't read file");
 		}
 		file->read(reinterpret_cast<char*>(batch.data()), batch.size());
-		int bytesRead = file->gcount();
+		int bytesRead = int(file->gcount());
 		if (bytesRead == 0) {
 			throw std::runtime_error("Truncated file");
 		}
@@ -1004,7 +1006,7 @@ public:
 #endif
 
 	IDeflateArchive(std::span<const uint8_t> data) : input([data] (std::span<uint8_t> batch) mutable {
-		int copying = std::min(batch.size(), data.size());
+		int copying = int(std::min(batch.size(), data.size()));
 		if (copying == 0) {
 			throw std::runtime_error("Truncated input");
 		}
@@ -1044,7 +1046,7 @@ public:
 					wasSeparator = true;
 				}
 			}
-			keeping = batch.end() - start;
+			keeping = int(batch.end() - start);
 		}
 		if (keeping > 0) {
 			if (wasSeparator)
@@ -1129,7 +1131,7 @@ struct IGzFileInfo {
 				std::span<const uint8_t> taken = input.getRange(extraHeaderSize - readSoFar);
 				checksum(taken);
 				extraData->insert(extraData->end(), taken.begin(), taken.end());
-				readSoFar += taken.size();
+				readSoFar += int(taken.size());
 			}
 		}
 		if (flags & 0x08) {
@@ -1156,7 +1158,7 @@ struct IGzFileInfo {
 		if (flags & 0x02) {
 			uint16_t expectedHeaderCrc = input.template getInteger<uint16_t>();
 			check(expectedHeaderCrc);
-			uint16_t realHeaderCrc = checksum();
+			uint16_t realHeaderCrc = uint16_t(checksum());
 			if (expectedHeaderCrc != realHeaderCrc)
 				throw std::runtime_error("Gzip archive's headers crc32 checksum doesn't match the actual header's checksum");
 		}

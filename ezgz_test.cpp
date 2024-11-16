@@ -3,6 +3,12 @@
 #include <string>
 #include "ezgz.hpp"
 
+#if EZGZ_HAS_CPP20
+constexpr char kCppVersion[] = "C++20";
+#else
+constexpr char kCppVersion[] = "C++17";
+#endif
+
 template <int Size>
 struct SettingsWithInputSize : EzGz::DefaultDecompressionSettings {
 	constexpr static int inputBufferSize = Size;
@@ -18,7 +24,7 @@ template <int Size>
 struct InputHelper : EzGz::Detail::ByteInput<SettingsWithInputSize<Size>> {
 	InputHelper(std::span<const uint8_t> source)
 	: EzGz::Detail::ByteInput<SettingsWithInputSize<Size>>([source, position = 0] (std::span<uint8_t> toFill) mutable -> int {
-		int filling = std::min(source.size() - position, toFill.size());
+		int filling = int(std::min(source.size() - position, toFill.size()));
 //		std::cout << "Providing " << filling << " bytes of data, " << (source.size() - position - filling) << " left" << std::endl;
 		if(filling != 0)
 			memcpy(toFill.data(), &source[position], filling);
@@ -31,6 +37,9 @@ int main(int, char**) {
 
 	int errors = 0;
 	int tests = 0;
+
+	std::cout << "EzGz Tests (compiled for " << kCppVersion << ")" << std::endl;
+	std::cout << "===============================" << std::endl;
 
 	auto doATest = [&] (auto is, auto shouldBe) {
 		tests++;
@@ -64,7 +73,7 @@ int main(int, char**) {
 		}
 
 		{
-			unsigned int twoBytes = byteReader.getBytes(2);
+			unsigned int twoBytes = unsigned(byteReader.getBytes(2));
 			doATest(twoBytes, 0b1010101010101010u);
 		}
 
@@ -94,7 +103,7 @@ int main(int, char**) {
 			while (read < tryingToRead) {
 				auto readTenBytes = reader.getRange(tryingToRead - read);
 				doATest(readTenBytes.size() < tryingToRead, true);
-				read += readTenBytes.size();
+				read += int(readTenBytes.size());
 			}
 			doATest(read, tryingToRead);
 		}
@@ -231,8 +240,8 @@ int main(int, char**) {
 		auto inspectStart = [&doATest, shouldBe, position = 0] (std::span<const char> reading) mutable -> int {
 			std::string_view correctPart = shouldBe.substr(position, reading.size());
 			doATest(std::string_view(reading.data(), reading.size()), correctPart);
-			position += reading.size();
-			return reading.size();
+			position += int(reading.size());
+			return int(reading.size());
 		};
 
 		{
@@ -419,6 +428,6 @@ int main(int, char**) {
 		}
 	}
 
-	std::cout << "Passed: " << (tests - errors) << " / " << tests << ", errors: " << errors << std::endl;
-	return 0;
+	std::cout << "Passed: " << (tests - errors) << " / " << tests << ", errors: " << errors << std::endl << std::endl;
+	return errors != 0; // if errors, report this back to calling script
 }
