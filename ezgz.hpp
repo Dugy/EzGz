@@ -36,19 +36,19 @@ namespace std {
 template <typename T>
 class span {
 public:
-	span() : ptr(nullptr), size(0) {}
-	span(T* ptr, std::size_t size) : ptr(ptr), size(size) {}
-	span(T* begin, T* end) : ptr(begin), size(std::distance(begin, end)) {}
+	span() : ptr(nullptr), sz(0) {}
+	span(T* ptr, std::size_t sz) : ptr(ptr), sz(sz) {}
+	span(T* begin, T* end) : ptr(begin), sz(std::distance(begin, end)) {}
 	template <typename It>
-	span(It begin, It end) : ptr(begin == end ? nullptr : &(*begin)), size(std::distance(begin, end)) {}
+	span(It begin, It end) : ptr(begin == end ? nullptr : &(*begin)), sz(std::distance(begin, end)) {}
 
     template <std::size_t N>
-	span(const std::array<std::remove_const_t<T>, N>& arr) : ptr(arr.data()), size(N) {}
+	span(const std::array<std::remove_const_t<T>, N>& arr) : ptr(arr.data()), sz(N) {}
 
 	T* data() { return ptr; }
 	const T* data() const { return ptr; }
 
-	std::size_t size() const { return size; }
+	std::size_t size() const { return sz; }
  
     using iterator = const T*;
     using const_iterator = const T*;
@@ -56,21 +56,21 @@ public:
 	iterator begin() { return ptr; }
 	const_iterator begin() const { return ptr; }
 
-	iterator end() { return ptr + size; }
-	const_iterator end() const { return ptr + size; }
+	iterator end() { return ptr + sz; }
+	const_iterator end() const { return ptr + sz; }
 
     span subspan(std::size_t offset, std::size_t count = std::size_t(-1)) const {
-		if (offset >= size) {
+		if (offset >= sz) {
             return span(); // Return an empty span if offset is out of bounds
         }
-		return span(ptr + offset, std::min(count, size - offset));
+		return span(ptr + offset, std::min(count, sz - offset));
     }
 
 	const T& operator[](std::size_t index) const { return ptr[index]; }
 
 private:
 	T* ptr;
-	std::size_t size;
+	std::size_t sz;
 };
 
 template <typename T>
@@ -84,6 +84,18 @@ constexpr std::ptrdiff_t ssize(const T(&)[N]) {
     return static_cast<std::ptrdiff_t>(N);
 }
 
+template <typename T>
+constexpr int bit_width(T value) {
+    static_assert(std::is_integral<T>::value && std::is_unsigned<T>::value, 
+                  "bit_width requires an unsigned integral type");
+
+    int width = 0;
+    while (value != 0) {
+        value >>= 1;
+        ++width;
+    }
+    return width;
+}
 } // end namespace std
 #endif // ! EZGZ_HAS_CPP20
 
@@ -123,17 +135,16 @@ concept DecompressionSettings = std::constructible_from<typename T::Checksum> &&
 	int(checksum(std::span<const uint8_t>()));
 	bool(T::verifyChecksum);
 };
-#else
-#define DecompressionSettings typename
-#endif
 
-#if EZGZ_HAS_CONCEPTS
 template <typename T>
 concept BasicStringType = std::constructible_from<T> && requires(T value) {
 	value += 'a';
 	std::string_view(value);
 };
 #else
+#define StreamSettings typename
+#define InputStreamSettings typename
+#define DecompressionSettings typename
 #define BasicStringType typename
 #endif
 
@@ -402,7 +413,7 @@ public:
 			memmove(buffer.data(), buffer.data() + offset, filled);
 			position -= offset;
 		}
-		return std::span<uint8_t>(buffer.begin() + filled, buffer.end());
+		return buffer.subspan(filled);
 	}
 
 	int doneFilling(int added) {
@@ -773,7 +784,7 @@ class BitOutput {
 
 	void doEmpty(int bytes) {
 		const char* dataAsBytes = reinterpret_cast<char*>(&data);
-		if constexpr (std::endian::native == std::endian::little) {
+		if constexpr (!IsBigEndian) {
 			std::array<char, 8> moved = {};
 			for (int i = 0; i < bytes; i++)
 				moved[i] = dataAsBytes[i];
@@ -1007,7 +1018,7 @@ class MultiIndexBloomFilter {
 		}
 	};
 	std::array<LookbackIndex, IndexLengths.size()> lookbackIndexes = ArrayFiller([] (int index) constexpr {
-		if constexpr (std::endian::native == std::endian::little)
+		if constexpr (!IsBigEndian)
 			return LookbackIndex{{}, 0xffffffffffffffff >> ((8 - IndexLengths[index]) * 8)};
 		else
 			return LookbackIndex{{}, 0xffffffffffffffff << ((8 - IndexLengths[index]) * 8)};
@@ -1657,7 +1668,7 @@ public:
 
 			bool enabled = true;
 			bool last = false;
-			Counts counts = {};
+			Counts counts;
 			int startPos = 0;
 			int endPos = 0;
 			int total = 0;
@@ -1865,7 +1876,7 @@ concept CompressionSettings = std::constructible_from<typename T::Checksum> && I
 	int(T::HuffmanSectionSize);
 };
 #else
-#define ComressionSettings typename
+#define CompressionSettings typename
 #endif
 
 struct DefaultCompressionSettings {
@@ -2494,6 +2505,8 @@ using OGzStream = BasicOGzStream<>;
 } // namespace EzGz
 
 #if ! EZGZ_HAS_CONCEPTS
+#undef StreamSettings
+#undef InputStreamSettings
 #undef DecompressionSettings
 #undef BasicStringType
 #undef ByteReader
