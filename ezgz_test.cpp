@@ -3,6 +3,13 @@
 #include <string>
 #include "ezgz.hpp"
 
+#if EZGZ_HAS_CPP20
+constexpr std::string_view CppVersion = "C++20";
+#else
+constexpr std::string_view CppVersion = "C++17";
+#endif
+
+
 template <int MaximumSize, int MinimumSize = 0, int LookAheadSize = sizeof(uint32_t)>
 struct SettingsWithInputSize : EzGz::DefaultDecompressionSettings {
 	using Checksum = EzGz::NoChecksum;
@@ -83,6 +90,10 @@ struct DeduplicationVerifier {
 };
 
 int main(int, char**) {
+
+	std::cout << "EzGz Tests (compiled for " << CppVersion << ")" << std::endl;
+	std::cout << "===============================" << std::endl;
+
 
 	int errors = 0;
 	int tests = 0;
@@ -173,7 +184,7 @@ int main(int, char**) {
 		}
 
 		{
-			unsigned int twoBytes = byteReader.getBytes(2);
+			unsigned int twoBytes = unsigned(byteReader.getBytes(2));
 			doATest(twoBytes, 0b1010101010101010u);
 		}
 
@@ -851,5 +862,5 @@ int main(int, char**) {
 	}
 
 	std::cout << "Passed: " << (tests - errors) << " / " << tests << ", errors: " << errors << std::endl;
-	return 0;
+	return errors != 0;
 }

@@ -1,0 +1,59 @@
+# Ignore build directories
+/build/
+/out/
+/bin/
+/lib/
+/obj/
+
+# Ignore build tools and temporary files
+CMakeFiles/
+CMakeCache.txt
+Makefile
+CMakeLists.txt.user
+*.cmake
+*.o
+*.obj
+*.so
+*.dll
+*.dylib
+*.exe
+*.a
+*.lib
+
+# Ignore generated files
+*.class
+*.gen.cpp
+*.moc.cpp
+*.moc
+*.qrc
+*.rcc
+
+# Ignore log and debugging files
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+*.pid
+
+# Ignore IDE/editor-specific files
+.idea/
+.vscode/
+*.code-workspace
+*.sln
+*.vcxproj*
+*.user
+*.DS_Store
+*.vscode/
+*.vs/
+Thumbs.db
+
+# Ignore system files
+*.gz
+*.zip
+*.tar.gz
+*.tar.bz2
+*.tar
+*.tgz
+*.tar.xz
+callgrind.out.*
