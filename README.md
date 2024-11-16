@@ -72,6 +72,22 @@ std::vector<char> decompressed = Ezgz::IGzFile<Settings>("data.gz").readAll();
 
 If including `fstream` is undesirable, the `EZGZ_NO_FILE` macro can be defined to remove the constructors that accept file names. This does not restrict usability much.
 
+### Compression (experimental)
+The implementation of compression is slower and has worse ratios than zlib because of known inefficiencies in some algorithms. Working on improvements. It can still provide some utility.
+
+You can use it this way:
+```C++
+EzGz::BasicOGzStream<EzGz::DefaultCompressionSettings> compressor = {EzGz::GzFileInfo<std::string>(inputName)};
+compressor.exceptions(std::ifstream::failbit);
+std::ifstream input(inputName, std::ios::binary);
+input.exceptions(std::ifstream::failbit);
+
+compressor << input.rdbuf();
+input.close();
+```
+
+It is configurable to some extent, but it may be changed completely in a future version.
+
 ## Performance
 Decompression is about 30% faster than with `zlib`. Decompression speeds over 250 MiB/s are reachable on modern CPUs. It was tested on the standard Silesia Corpus file, compressed for minimum size.
 
