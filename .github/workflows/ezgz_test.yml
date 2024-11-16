@@ -4,7 +4,7 @@ on:
     pull_request:
         branches: [master]
     push:
-        branches: [master, ezgz_yml_cleanup]
+        branches: [master]
 jobs:
   ezgz_test:
     runs-on: ${{ matrix.os }}
