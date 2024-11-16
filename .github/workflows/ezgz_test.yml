@@ -1,10 +1,10 @@
-name: C++ CMake Tests
+name: EzGz Tests
 
 on:
     pull_request:
         branches: [master]
     push:
-        branches: [master]
+        branches: [master, ezgz_yml_cleanup]
 jobs:
   ezgz_test:
     runs-on: ${{ matrix.os }}
@@ -15,6 +15,10 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         standard: [17, 20] # This corresponds to C++17 and C++20
 
+    env:
+      BUILD_DIR: build
+      EXECUTABLE: ''
+    
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -22,10 +26,8 @@ jobs:
     - name: Set up CMake
       run: |
         if [ "${{ matrix.os }}" == "windows-latest" ]; then
-          echo "BUILD_DIR=build" >> $GITHUB_ENV
           echo "EXECUTABLE=build/bin/Release/ezgz_test.exe" >> $GITHUB_ENV
         else
-          echo "BUILD_DIR=build" >> $GITHUB_ENV
           echo "EXECUTABLE=build/bin/ezgz_test" >> $GITHUB_ENV
         fi
       shell: bash
