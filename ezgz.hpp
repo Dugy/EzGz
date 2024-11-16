@@ -282,7 +282,6 @@ public:
 	uint64_t getEightBytesFromCurrentPosition() {
 		ensureSize(1);
 		uint64_t got = getEightBytesAtPosition(position);
-//		std::cout << "Got eight bytes at " << position << std::endl;
 		position++;
 		return got;
 	}
@@ -525,12 +524,10 @@ private:
 
 	void ensureSize(int size) {
 		if (position + size > std::ssize(deduplicated)) [[unlikely]] {
-//			std::cout << "Submitting up to " << position << " (max at " << std::ssize(deduplicated) << ")" << std::endl;
 			Section section(std::span<const int16_t>(deduplicated.begin(), deduplicated.begin() + position));
 			int consumed = submit(section, false);
 			if (consumed < std::ssize(deduplicated) - position - size)
 				throw std::runtime_error("DeduplicatedStream must have a submit callback that consumes at least 4 bytes");
-//			std::cout << "It removed " << consumed << " bytes" << std::endl;
 			memmove(deduplicated.data(), deduplicated.data() + consumed, (position - consumed) * sizeof(int16_t));
 			position -= consumed;
 		}
@@ -615,15 +612,12 @@ public:
 	}
 
 	std::span<const char> getBuffer() {
-//		std::cout << "Getting buffer range " << kept << " - " << (used - kept) << std::endl;
 		return std::span<const char>(buffer.data() + kept, used - kept);
 	}
 
 	void cleanBuffer(int leave = 0) {
 		leave = std::max(leave, expectsMore? Settings::minSize : 0);
-//		std::cout << "Cleaning buffer, leaving " << leave << " behind" << std::endl;
 		if (used - leave <= 0) {
-//			std::cout << "No need to write anything" << std::endl;
 			return;
 		}
 		if (leave == 0) {
@@ -638,12 +632,10 @@ public:
 			used = leave;
 			kept = leave;
 		}
-//		std::cout << "Wrote " << writtenOut << " bytes" << std::endl;
 	}
 
 	void addByte(char byte) {
 		checkSize();
-//		std::cout << "Adding byte " << byte << std::endl;
 		buffer[used] = byte;
 		used++;
 	}
@@ -662,7 +654,6 @@ public:
 				throw std::runtime_error("Looking back too many bytes, corrupted archive or insufficient buffer size");
 			}
 			int toWrite = std::min(distance, length - written);
-//			std::cout << "Repeating sequence " << std::string_view(buffer.data() + used - distance, toWrite) << std::endl;
 			memmove(buffer.data() + used, buffer.data() + used - distance, toWrite);
 			used += toWrite;
 			written += toWrite;
@@ -763,13 +754,11 @@ public:
 		for (int i = 0; i < realSize; ) {
 			int length = 0;
 			reader.peekAByteAndConsumeSome([&] (uint8_t peeked) {
-//				std::cout << "Peeked " << int(peeked) << std::endl;
 				length = codeCodingLookup[peeked];
 				return codeCodingLengths[length];
 			});
 			if (length < 16) {
 				codes[i].length = length;
-//				std::cout << "Element " << i << " has size " << length << std::endl;
 				i++;
 				quantities[length]++;
 			} else if (length == 16) {
@@ -778,7 +767,6 @@ public:
 				int copy = reader.getBits(2) + 3;
 				for (int j = i; j < i + copy; j++) {
 					codes[j].length = codes[i - 1].length;
-//					std::cout << "Element " << j << " has size " << int(codes[j].length) << std::endl;
 				}
 				quantities[codes[i - 1].length] += copy;
 				i += copy;
@@ -963,7 +951,6 @@ public:
 				}
 				break;
 			}
-//				std::cout << "Saving at " << sequenceHash << std::endl;
 			lookbackIndexes[index].positions[sequenceHash] = position;
 		}
 		return {position, 0};
@@ -986,7 +973,6 @@ public:
 	void deduplicateSome() {
 		do {
 			uint64_t sequence = input.getEightBytesFromCurrentPosition();
-//			std::cout << "Sequence is " << sequence << std::endl;
 			// Shift positions int the map to the new offset
 			if (input.getPositionStart() != positionStart) [[unlikely]] {
 				int newStart = input.getPositionStart();
@@ -1005,11 +991,9 @@ public:
 				for (int i = 0; i < matchLength; i++) {
 					copied += input.getAtPosition(location + i);
 				}
-//				std::cout << "Adding " << copied << std::endl;
 				output.addDuplication(matchLength, position - location);
 				input.advancePosition(matchLength - 1);
 			} else {
-//				std::cout << "Adding " << char(input.getAtPosition(position)) << std::endl;
 				output.addByte(input.getAtPosition(position));
 			}
 		} while (input.hasMoreDataInBuffer());
@@ -1033,7 +1017,6 @@ class DeflateReader {
 			return (copyLength == 0);
 		}
 		bool copy(decltype(DeflateReader::output)& output, int length, int distance) {
-//			std::cout << "Copying " << length << " bytes from " << distance << " behind" << std::endl;
 			copyLength = length;
 			copyDistance = distance;
 			return restart(output);
@@ -1150,21 +1133,13 @@ class DeflateReader {
 					return true; // Out of space
 				}
 			}
-			std::string appended = "";
 			while (parent->output.available()) {
 				int word = codes.readWord();
-
 				if (word < 256) {
-//					std::cout << "Found letter " << word << std::endl;
-					appended += word;
 					parent->output.addByte(word);
 				} else if (word == 256) [[unlikely]] {
 					break;
 				} else {
-					if (appended == "allegi") {
-						std::cout << "Found a " << appended << std::endl;
-					}
-					appended = "";
 					int length = word - 254;
 					if (length > 10) {
 						length = input.parseLongerSize(length);
@@ -1173,7 +1148,6 @@ class DeflateReader {
 					if (distance > 4) {
 						distance = input.parseLongerDistance(distance);
 					}
-//					std::cout << "Copying " << length << " bytes from " << distance << " behind" << std::endl;
 					CopyState::copy(parent->output, length, distance);
 				}
 			}
@@ -1318,15 +1292,12 @@ class HuffmanWriter {
 			int previousLength = 0;
 			int previousLengthRepeats = 0;
 			auto doneRepeating = [&] {
-//				std::cout << "We have length " << previousLength << " after occurring " << previousLengthRepeats << " times" << std::endl;
 				bool repeatAgain = false;
 				do {
 					repeatAgain = false;
 					if (previousLengthRepeats == 1) {
-//						std::cout << "Printing " << previousLength << " once" << std::endl;
 						applied(previousLength, 0);
 					} else if (previousLengthRepeats == 2) {
-//						std::cout << "Printing " << previousLength << " twice" << std::endl;
 						applied(previousLength, 0);
 						applied(previousLength, 0);
 					} else {
@@ -1334,28 +1305,23 @@ class HuffmanWriter {
 						if (previousLength == 0) {
 							if (previousLengthRepeats > 10) {
 								applied(18, std::min(previousLengthRepeats, 138));
-//								std::cout << "Printing large batch of " << std::min(previousLengthRepeats, 138) << " zeroes" << std::endl;
 								previousLengthRepeats = std::max(0, previousLengthRepeats - 138);
 								if (previousLengthRepeats > 0) {
 									repeatAgain = true;
 								}
 							} else {
 								applied(17, previousLengthRepeats);
-//								std::cout << "Printing small batch of " << previousLengthRepeats << " zeroes" << std::endl;
 								previousLengthRepeats = 0;
 							}
 						} else {
-//							std::cout << "Printing " << previousLength << " once" << std::endl;
 							applied(previousLength, 0);
 							previousLengthRepeats--;
 							while (previousLengthRepeats > 0) {
 								if (previousLengthRepeats < 3) {
-//									std::cout << "Printing " << previousLength << " " << previousLengthRepeats << " times" << std::endl;
 									for (int i = 0; i < previousLengthRepeats; i++)
 										applied(previousLength, 0);
 									break;
 								} else {
-//									std::cout << "Bulk printing " << previousLength << " " << previousLengthRepeats << " times" << std::endl;
 									applied(16, std::min(6, previousLengthRepeats));
 									previousLengthRepeats = std::max(0, previousLengthRepeats - 6);
 								}
@@ -1449,7 +1415,6 @@ class HuffmanWriter {
 				}
 				for (int i = sameLengthRangeBegin; i < sameLengthRangeEnd; i++) {
 					made.codes[sortedCounts[i].index] = typename HuffmanTable<Size>::Entry(currentCode, sortedCounts[i].length);
-					//std::cout << "Code for " << word.index << " is now " << made.codes[word.index].code << " with length " << int(made.codes[word.index].length) << " from current code " << currentCode << std::endl;
 					currentCode += 1;
 				}
 				sameLengthRangeBegin = sameLengthRangeEnd;
@@ -1660,23 +1625,19 @@ public:
 
 					// Code encoding
 					for (int i = 0; i < codeCodingTableLength; i++) {
-		//				std::cout << "Writing " << int(codeEncoding.codes[codeCodingReorder[i]].length) << " for " << int(codeCodingReorder[i]) << std::endl;
 						bitOutput.addBits(codeEncoding.codes[codeCodingReorder[i]].length, 3); // Writing some bullshit here
 					}
 
 					// Code declaration
 					auto encodeCode = [this, &bitOutput] (const auto& code, int endAt, int increment) {
 						code.runThroughCodeEncoding(endAt, increment, [this, &bitOutput] (int word, int extra) {
-				//			std::cout << "Adding " << int(encoding.codes[word].length) << " bits of code " << encoding.codes[word].code << std::endl;
 							bitOutput.addBits(codeEncoding.codes[word].code, codeEncoding.codes[word].length);
 							if (word == 16) {
 								bitOutput.addBits(extra - 3, 2);
 							} else if (word == 17) {
 								bitOutput.addBits(extra - 3, 3);
-				//				std::cout << "...followed by 3 bits of " << extra - 3 << std::endl;
 							} else if (word == 18) {
 								bitOutput.addBits(extra - 11, 7);
-				//				std::cout << "...followed by 7 bits of " << extra - 11 << std::endl;
 							}
 						});
 					};
@@ -1702,7 +1663,6 @@ public:
 					});
 					bitOutput.addBits(wordEncoding->codes[word].code, wordEncoding->codes[word].length);
 					if (alsoOthers) { // Hopefully this will be optimised out
-		//				std::cout << "Copy " << word << " +(" << length.remainder << ": " << length.length << ") with distance " << (-1 - distanceWord) << " +(" << distance.remainder << " - " << distance.length << ")" << std::endl;
 						if (word >= 265) {
 							bitOutput.addBitsAndCrop(length.remainder, length.length);
 						}
@@ -1764,7 +1724,6 @@ public:
 				if (mid >= std::ssize(blocks))
 					break; // Past the end
 				int end = std::min<int>(start + width * 2, std::ssize(blocks));
-//				std::cout << "Connecting in ranges " << start << " - " << mid << " and " << mid << " - " << end << std::endl;
 				int startBlockIndex = mid - 1;
 				for ( ; startBlockIndex >= start; startBlockIndex--) {
 					if (blocks[startBlockIndex].getEnabled())
@@ -1780,16 +1739,9 @@ public:
 				if (endBlockIndex >= end)
 					continue; // Foud nothing
 
-//				std::cout << "Trying to fuse " << startBlockIndex << " and " << endBlockIndex << std::endl;
 				considerMerge(blocks[startBlockIndex], blocks[endBlockIndex]);
 			}
 		}
-//		for (int i = 0; i < std::ssize(blocks); i++) {
-//			std::cout << "Block " << i << (blocks[i].getEnabled() ? " enabled" : " disabled") << std::endl;
-//			if (blocks[i].getEnabled()) {
-//				std::cout << "Range " << blocks[i].getStart() << " - " << blocks[i].getEnd() << std::endl;
-//			}
-//		}
 
 		if (!bitOutput) {
 			bitOutput.emplace(byteOutput);
