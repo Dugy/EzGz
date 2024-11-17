@@ -602,7 +602,7 @@ public:
 			return position == std::ssize(section);
 		}
 		int endPosition() const {
-			return std::ssize(section);
+			return int(std::ssize(section));
 		}
 
 		constexpr static int MaxSize = Settings::maxSize;
@@ -1003,7 +1003,7 @@ class MultiIndexBloomFilter {
 
 		void moveBack(int offset) {
 			for (IndexType& position : positions) {
-				position -= offset;
+				position -= IndexType(offset);
 			}
 		}
 	};
@@ -1032,7 +1032,7 @@ public:
 	}
 
 	std::pair<IndexType, int> locate(uint64_t sequence) {
-		int position = input.getPosition() - 1;
+		IndexType position = IndexType(input.getPosition() - 1);
 		IndexType location = 0;
 		int matchLength = 0;
 		for (int index = std::ssize(IndexLengths) - 1; index >= 0; index--) {
@@ -1052,7 +1052,7 @@ public:
 				}
 				break;
 			}
-			lookbackIndexes[index].positions[sequenceHash] = position;
+			lookbackIndexes[index].positions[sequenceHash] = static_cast<std::remove_reference_t<decltype(lookbackIndexes[0].positions[0])>>(position);
 		}
 		return {position, 0};
 	}
@@ -1515,7 +1515,7 @@ class HuffmanWriter {
 					});
 				}
 				for (int i = sameLengthRangeBegin; i < sameLengthRangeEnd; i++) {
-					made.codes[sortedCounts[i].index] = typename HuffmanTable<Size>::Entry(currentCode, sortedCounts[i].length);
+					made.codes[sortedCounts[i].index] = typename HuffmanTable<Size>::Entry(currentCode, uint8_t(sortedCounts[i].length));
 					currentCode += 1;
 				}
 				sameLengthRangeBegin = sameLengthRangeEnd;
@@ -1955,7 +1955,7 @@ std::vector<uint8_t> writeDeflateIntoVector(std::function<int(std::span<char> ba
 template <CompressionSettings Settings>
 std::vector<uint8_t> writeDeflateIntoVector(std::span<const char> allData) {
 	return writeDeflateIntoVector<Settings>([allData, position = 0] (std::span<char> toFill) mutable -> int {
-		int filling = std::min(allData.size() - position, toFill.size());
+		int filling = std::min(int(allData.size() - position), int(toFill.size()));
 		if(filling != 0)
 			memcpy(toFill.data(), &allData[position], filling);
 		position += filling;
@@ -1999,7 +1999,7 @@ public:
 #endif
 
 	IDeflateArchive(std::span<const uint8_t> data) : input([data] (std::span<uint8_t> batch) mutable {
-		int copying = std::min(batch.size(), data.size());
+		int copying = int(std::min(batch.size(), data.size()));
 		if (copying == 0) {
 			return 0;
 		}
@@ -2134,7 +2134,7 @@ public:
 		while (position < std::ssize(section)) {
 			bool doDeduplicate = false;
 			input.refillSome([&] (std::span<uint8_t> outSection) -> int {
-				int copied = std::min<int>(section.size() - position, outSection.size());
+				int copied = std::min(int(section.size() - position), int(outSection.size()));
 				doDeduplicate = (std::ssize(outSection) <= std::ssize(section) * 0.8);
 				memcpy(outSection.data(), section.data() + position, copied);
 				position += copied;

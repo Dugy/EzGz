@@ -66,6 +66,11 @@ if (WARNING_OPTIONS)
     target_compile_options(ezgz_compress PRIVATE ${WARNING_OPTIONS} ${DEBUG_FLAGS})
 endif()
 
+# Linker options (Windows)
+if(MSVC)
+    target_link_options(ezgz_test PRIVATE /STACK:8388608)  # 8 MB stack size
+endif()
+
 # Add threading support
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
