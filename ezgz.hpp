@@ -17,7 +17,6 @@ static_assert(__cplusplus >= 201703L, "C++17 or higher is required");
 #endif
 #include <algorithm>
 #include <charconv>
-#include <bit>
 #include <vector>
 #include <numeric>
 #include <optional>
@@ -92,12 +91,17 @@ constexpr std::ptrdiff_t ssize(const T(&)[N]) {
 }
 
 template <typename T>
-int bit_width(T number) {
-	size_t result = 0;
-	for (; number > 0; number >>= 1, result++);
-	return result;
-};
+constexpr int bit_width(T value) {
+	static_assert(std::is_integral<T>::value && std::is_unsigned<T>::value,
+		"bit_width requires an unsigned integral type");
 
+	int width = 0;
+	while (value != 0) {
+		value >>= 1;
+		++width;
+	}
+	return width;
+}
 } // end namespace std
 #endif // ! EZGZ_HAS_CPP20
 
@@ -673,7 +677,7 @@ public:
 			add(-1);
 		} else {
 			unsigned int modifiedLength = length - 3;
-			int width = std::bit_width(uint32_t(modifiedLength));
+			int width = std::bit_width(modifiedLength);
 			int suffixWidth = width - 3;
 			int prefix = modifiedLength >> suffixWidth;
 			int code = 257 + prefix + (suffixWidth << 2);
