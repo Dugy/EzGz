@@ -45,7 +45,7 @@ struct InputHelper : EzGz::Detail::ByteInputWithBuffer<typename SettingsWithInpu
 	}) {}
 };
 
-template <EzGz::StreamSettings Settings>
+template <typename Settings>
 struct DeduplicationVerifier {
 	std::string parsed;
 	int duplicationsFound = 0;

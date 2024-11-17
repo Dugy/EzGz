@@ -37,41 +37,47 @@ namespace std {
 template <typename T>
 class span {
 public:
-	span() : ptr(nullptr), size(0) {}
-	span(T* ptr, std::size_t size) : ptr(ptr), size(size) {}
-	span(T* begin, T* end) : ptr(begin), size(std::distance(begin, end)) {}
+	span() : ptr(nullptr), length(0) {}
+	span(const span<T>&) = default;
+	span(T* ptr, std::size_t size) : ptr(ptr), length(size) {}
+	span(T* begin, T* end) : ptr(begin), length(std::distance(begin, end)) {}
 	template <typename It>
-	span(It begin, It end) : ptr(begin == end ? nullptr : &(*begin)), size(std::distance(begin, end)) {}
+	span(It begin, It end) : ptr(begin == end ? nullptr : &(*begin)), length(std::distance(begin, end)) {}
+	template <typename Source, std::enable_if_t<std::is_convertible_v<decltype(std::declval<Source>().data()), T*> && std::is_integral_v<decltype(std::declval<Source>().size())>>* = nullptr>
+	span(Source& source) : ptr(source.data()), length(source.size()) {}
 
-    template <std::size_t N>
-	span(const std::array<std::remove_const_t<T>, N>& arr) : ptr(arr.data()), size(N) {}
+	template <std::size_t N>
+	span(std::array<std::remove_const_t<T>, N>& arr) : ptr(arr.data()), length(N) {}
+	template <std::size_t N>
+	span(const std::array<const T, N>& arr) : ptr(arr.data()), length(N) {}
 
 	T* data() { return ptr; }
 	const T* data() const { return ptr; }
 
-	std::size_t size() const { return size; }
+	std::size_t size() const { return length; }
  
-    using iterator = const T*;
+	using iterator = T*;
     using const_iterator = const T*;
 
 	iterator begin() { return ptr; }
 	const_iterator begin() const { return ptr; }
 
-	iterator end() { return ptr + size; }
-	const_iterator end() const { return ptr + size; }
+	iterator end() { return ptr + length; }
+	const_iterator end() const { return ptr + length; }
 
     span subspan(std::size_t offset, std::size_t count = std::size_t(-1)) const {
-		if (offset >= size) {
+		if (offset >= length) {
             return span(); // Return an empty span if offset is out of bounds
         }
-		return span(ptr + offset, std::min(count, size - offset));
+		return span(ptr + offset, std::min(count, length - offset));
     }
 
 	const T& operator[](std::size_t index) const { return ptr[index]; }
+	T& operator[](std::size_t index) { return ptr[index]; }
 
 private:
 	T* ptr;
-	std::size_t size;
+	std::size_t length;
 };
 
 template <typename T>
@@ -84,6 +90,13 @@ template <typename T, std::size_t N>
 constexpr std::ptrdiff_t ssize(const T(&)[N]) {
     return static_cast<std::ptrdiff_t>(N);
 }
+
+template <typename T>
+int bit_width(T number) {
+	size_t result = 0;
+	for (; number > 0; number >>= 1, result++);
+	return result;
+};
 
 } // end namespace std
 #endif // ! EZGZ_HAS_CPP20
@@ -125,6 +138,8 @@ concept DecompressionSettings = std::constructible_from<typename T::Checksum> &&
 	bool(T::verifyChecksum);
 };
 #else
+#define StreamSettings typename
+#define InputStreamSettings typename
 #define DecompressionSettings typename
 #endif
 
@@ -394,7 +409,6 @@ public:
 		int added = readMoreFunction(startFilling());
 		return doneFilling(added);
 	}
-
 	std::span<uint8_t> startFilling() {
 		if (position + lookAheadSize >= filled) {
 			int offset = std::max(0, position - minSize);
@@ -993,8 +1007,9 @@ concept DeduplicatingSearch = requires(Index index, Detail::ByteInput& input, in
 #define DeduplicatingSearch typename
 #endif
 
-template <int IndexLength = 31237, auto IndexLengths = std::array<int, 3>{4, 6, 8}, int ChunkSize = 30000, typename IndexType = uint16_t>
+template <int IndexLength = 31237, int IndexLengthSize = 3, int ChunkSize = 30000, typename IndexType = uint16_t>
 class MultiIndexBloomFilter {
+	constexpr static std::array<int, 3> indexLengths = {4, 6, 8};
 	ByteInput& input;
 
 	struct LookbackIndex {
@@ -1007,17 +1022,17 @@ class MultiIndexBloomFilter {
 			}
 		}
 	};
-	std::array<LookbackIndex, IndexLengths.size()> lookbackIndexes = ArrayFiller([] (int index) constexpr {
+	std::array<LookbackIndex, IndexLengthSize> lookbackIndexes = ArrayFiller([] (int index) constexpr {
 		if constexpr (!IsBigEndian)
-			return LookbackIndex{{}, 0xffffffffffffffff >> ((8 - IndexLengths[index]) * 8)};
+			return LookbackIndex{{}, 0xffffffffffffffff >> ((8 - indexLengths[index]) * 8)};
 		else
-			return LookbackIndex{{}, 0xffffffffffffffff << ((8 - IndexLengths[index]) * 8)};
+			return LookbackIndex{{}, 0xffffffffffffffff << ((8 - indexLengths[index]) * 8)};
 	});
 
 	template <int Index> // Just check if we aren't indexing something that doesn't fit the numeric type
 	constexpr static bool checkIfNoneGreaterThanEight() {
-		if constexpr(Index < std::ssize(IndexLengths)) {
-			static_assert(IndexLengths[Index] <= 8, "We can't have longer indexes than 8 bytes with uint64_t as pseudohash");
+		if constexpr(Index < IndexLengthSize) {
+			static_assert(indexLengths[Index] <= 8, "We can't have longer indexes than 8 bytes with uint64_t as pseudohash");
 			return checkIfNoneGreaterThanEight<Index + 1>();
 		} else return true;
 	}
@@ -1035,7 +1050,7 @@ public:
 		IndexType position = IndexType(input.getPosition() - 1);
 		IndexType location = 0;
 		int matchLength = 0;
-		for (int index = std::ssize(IndexLengths) - 1; index >= 0; index--) {
+		for (int index = IndexLengthSize - 1; index >= 0; index--) {
 			uint64_t trimmedSequence = sequence & lookbackIndexes[index].mask;
 			int sequenceHash = trimmedSequence % IndexLength;
 			location = lookbackIndexes[index].positions[sequenceHash];
@@ -1045,7 +1060,7 @@ public:
 			uint64_t there = input.getEightBytesAtPosition(location);
 			there &= lookbackIndexes[index].mask;
 			if (there == trimmedSequence) {
-				for (matchLength = IndexLengths[index]; matchLength < maximumCopyLength; matchLength++) { // TODO: Don't go past end
+				for (matchLength = indexLengths[index]; matchLength < maximumCopyLength; matchLength++) { // TODO: Don't go past end
 					if (input.getAtPosition(location + matchLength) != input.getAtPosition(position + matchLength)) {
 						return {location, matchLength};
 					}
@@ -1865,7 +1880,7 @@ concept CompressionSettings = std::constructible_from<typename T::Checksum> && I
 	int(T::HuffmanSectionSize);
 };
 #else
-#define ComressionSettings typename
+#define CompressionSettings typename
 #endif
 
 struct DefaultCompressionSettings {
@@ -2494,6 +2509,8 @@ using OGzStream = BasicOGzStream<>;
 } // namespace EzGz
 
 #if ! EZGZ_HAS_CONCEPTS
+#undef StreamSettings
+#undef InputStreamSettings
 #undef DecompressionSettings
 #undef BasicStringType
 #undef ByteReader
