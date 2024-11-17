@@ -15,6 +15,7 @@ static_assert(__cplusplus >= 201703L, "C++17 or higher is required");
 #include <span>
 #include <bit>
 #endif
+#include <algorithm>
 #include <charconv>
 #include <bit>
 #include <vector>
@@ -662,7 +663,7 @@ public:
 		ensureSize(4);
 
 		if (length <= 10) {
-			add(254 + length);
+			add(int16_t(254 + length));
 			add(-1);
 		} else if (length == maximumCopyLength) {
 			add(285);
@@ -673,12 +674,12 @@ public:
 			int suffixWidth = width - 3;
 			int prefix = modifiedLength >> suffixWidth;
 			int code = 257 + prefix + (suffixWidth << 2);
-			add(code);
-			add(-modifiedLength);
+			add(int16_t(code));
+			add(-int16_t(modifiedLength));
 		}
 
 		if (distance <= 4) {
-			add(-distance);
+			add(int16_t(-distance));
 			add(-1);
 		} else {
 			unsigned int modifiedDistance = distance - 1;
@@ -686,8 +687,8 @@ public:
 			int suffixWidth = width - 2;
 			int prefix = modifiedDistance >> suffixWidth;
 			int code = prefix + (suffixWidth << 1);
-			add(-code - 1);
-			add(-modifiedDistance);
+			add(int16_t(- code - 1));
+			add(-int16_t(modifiedDistance));
 		}
 	}
 
@@ -912,7 +913,7 @@ public:
 							codes[i].start = reversedBytes[firstPart];
 							for (int code = codes[i].start >> (8 - size); code < std::ssize(codesIndex); code += (1 << size)) {
 								codesIndex[code].word = int16_t(i);
-								codesIndex[code].length = int16_t(size);
+								codesIndex[code].length = int8_t(size);
 								codesIndex[code].valid = true;
 							}
 						} else {
@@ -1025,7 +1026,7 @@ class MultiIndexBloomFilter {
 	});
 
 	template <int Index> // Just check if we aren't indexing something that doesn't fit the numeric type
-	static bool checkIfNoneGreaterThanEight() {
+	constexpr static bool checkIfNoneGreaterThanEight() {
 		if constexpr(Index < std::ssize(IndexLengths)) {
 			static_assert(IndexLengths[Index] <= 8, "We can't have longer indexes than 8 bytes with uint64_t as pseudohash");
 			return checkIfNoneGreaterThanEight<Index + 1>();
@@ -1086,7 +1087,7 @@ public:
 			uint64_t sequence = input.getEightBytesFromCurrentPosition();
 			// Shift positions int the map to the new offset
 			if (input.getPositionStart() != positionStart) [[unlikely]] {
-				int newStart = input.getPositionStart();
+				int newStart = int(input.getPositionStart());
 				int shift = newStart - positionStart;
 				search.moveBack(shift);
 				positionStart = newStart;
@@ -1215,7 +1216,7 @@ class DeflateReader {
 					CopyState::copy(parent->output, length, distance);
 				} else {
 					if (code.code < 144) {
-						parent->output.addByte(code.code);
+						parent->output.addByte(char(code.code));
 					} else {
 						uint8_t full = uint8_t((((code.code - 144)) << 1) + 144 + input.getBits(1));
 						parent->output.addByte(full);
@@ -1247,7 +1248,7 @@ class DeflateReader {
 			while (parent->output.available()) {
 				int word = codes.readWord();
 				if (word < 256) {
-					parent->output.addByte(word);
+					parent->output.addByte(char(word));
 				} else if (word == 256) [[unlikely]] {
 					break;
 				} else {
@@ -1394,7 +1395,7 @@ class HuffmanWriter {
 		})) {}
 		struct UseDefaultDistanceEncoding {};
 		constexpr HuffmanTable(UseDefaultDistanceEncoding) : codes(ArrayFiller([] (int index) {
-			return Entry(29 - index, 5);
+			return Entry(uint16_t(29 - index), 5);
 		})) {}
 
 
@@ -1630,7 +1631,7 @@ public:
 				words++;
 
 				// We'll need to stop writing lengths from some point
-				for (int i = std::ssize(wordCounts.counts) - 1; i > 257; i--) {
+				for (int i = int(std::ssize(wordCounts.counts)) - 1; i > 257; i--) {
 					if (wordCounts.counts[i].count != 0) {
 						lengthsAfter256 = i - 256;
 						break;
@@ -1654,7 +1655,7 @@ public:
 				for (int i = 0; i <= 256 + lengthsAfter256; i++) {
 					wordCounts.counts[i].count = first.wordCounts.counts[i].count + second.wordCounts.counts[i].count;
 				}
-				for (int i = std::ssize(distanceCounts.counts) - 1; i >= lowestDistanceWord; i--) {
+				for (int i = int(std::ssize(distanceCounts.counts) - 1); i >= lowestDistanceWord; i--) {
 					distanceCounts.counts[i].count = first.distanceCounts.counts[i].count + second.distanceCounts.counts[i].count;
 				}
 
@@ -2208,7 +2209,7 @@ enum class CreatingOperatingSystem {
 // File information in the .gz file
 template <BasicStringType StringType>
 struct GzFileInfo {
-	int32_t modificationTime = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+	int32_t modificationTime = int32_t(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
 	CreatingOperatingSystem operatingSystem = CreatingOperatingSystem::OTHER;
 	bool fastestCompression = false;
 	bool densestCompression = false;
@@ -2373,8 +2374,8 @@ class OGzFile : public ODeflateArchive<Settings, FastCrc32> {
 				memcpy(bytes.data(), &value, bytes.size());
 				ODeflateArchive<Settings, FastCrc32>::output.addBytes(bytes);
 			};
-			writeInteger(ODeflateArchive<Settings, FastCrc32>::input.checksum());
-			writeInteger(ODeflateArchive<Settings, FastCrc32>::input.getPosition() + ODeflateArchive<Settings, FastCrc32>::input.getPositionStart());
+			writeInteger(uint32_t(ODeflateArchive<Settings, FastCrc32>::input.checksum()));
+			writeInteger(uint32_t(ODeflateArchive<Settings, FastCrc32>::input.getPosition() + ODeflateArchive<Settings, FastCrc32>::input.getPositionStart()));
 		});
 	}
 
@@ -2435,7 +2436,7 @@ class OGzStreamBuffer : public std::streambuf {
 		setp(reinterpret_cast<char*>(range.data()), reinterpret_cast<char*>(range.data()) + range.size());
 	}
 	void clearBuffer() {
-		writeBuffer.finish(pptr() - pbase());
+		writeBuffer.finish(int(pptr() - pbase()));
 	}
 public:
 
@@ -2454,7 +2455,7 @@ public:
 	int_type overflow(int_type added) override {
 		clearBuffer();
 		prepareBuffer();
-		writeBuffer.accessRange()[0] = added;
+		writeBuffer.accessRange()[0] = static_cast<std::remove_reference_t<decltype(writeBuffer.accessRange()[0])>>(added);
 		pbump(1);
 		return 0;
 	}

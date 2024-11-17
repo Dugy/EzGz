@@ -36,7 +36,7 @@ struct InputHelper : EzGz::Detail::ByteInputWithBuffer<typename SettingsWithInpu
 	InputHelper(std::span<const uint8_t> source)
 	: EzGz::Detail::ByteInputWithBuffer<typename SettingsWithInputSize<MaxSize, MinSize, LookAheadSize>::Input, typename SettingsWithInputSize<MaxSize, MinSize, LookAheadSize>::Checksum>(
 				[source, position = 0] (std::span<uint8_t> toFill) mutable -> int {
-		int filling = std::min(source.size() - position, toFill.size());
+		int filling = int(std::min(source.size() - position, toFill.size()));
 //		std::cout << "Providing " << filling << " bytes of data, " << (source.size() - position - filling) << " left" << std::endl;
 		if(filling != 0)
 			memcpy(toFill.data(), &source[position], filling);
@@ -63,7 +63,7 @@ struct DeduplicationVerifier {
 				distanceRemainder = distanceRemainderCopy;
 			});
 			if (word < 256) {
-				parsed.push_back(word);
+				parsed.push_back(char(word));
 //				std::cout << "Got " << char(word) << std::endl;
 			} else if (word > 256) {
 				duplicationsFound++;
@@ -148,7 +148,7 @@ int main(int, char**) {
 
 		int consumed = 0;
 		while (consumed < 3) {
-			consumed += byteReader.getRange(3 - consumed).size();
+			consumed += int(byteReader.getRange(3 - consumed).size());
 		}
 		doATest(byteReader.getPosition() + byteReader.getPositionStart(), 4);
 		for (int i = 1; i <= 4; i++) {
@@ -159,7 +159,7 @@ int main(int, char**) {
 		doATest(byteReader.getInteger<char>(), 'e');
 		consumed = 0;
 		while (consumed < 3) {
-			consumed += byteReader.getRange(3 - consumed).size();
+			consumed += int(byteReader.getRange(3 - consumed).size());
 		}
 		for (int i = 5; i <= 8; i++) {
 			doATest(byteReader.getAtPosition(byteReader.getPosition() + i - 8), data[i]);
@@ -214,7 +214,7 @@ int main(int, char**) {
 			while (read < tryingToRead) {
 				auto readTenBytes = reader.getRange(tryingToRead - read);
 				doATest(readTenBytes.size() < tryingToRead, true);
-				read += readTenBytes.size();
+				read += int(readTenBytes.size());
 			}
 			doATest(read, tryingToRead);
 		}
@@ -447,8 +447,8 @@ int main(int, char**) {
 		auto inspectStart = [&doATest, shouldBe, position = 0] (std::span<const char> reading) mutable -> int {
 			std::string_view correctPart = shouldBe.substr(position, reading.size());
 			doATest(std::string_view(reading.data(), reading.size()), correctPart);
-			position += reading.size();
-			return reading.size();
+			position += int(reading.size());
+			return int(reading.size());
 		};
 
 		{
