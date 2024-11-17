@@ -37,7 +37,6 @@ template <typename T>
 class span {
 public:
 	span() : ptr(nullptr), length(0) {}
-	span(const span<T>&) = default;
 	span(T* ptr, std::size_t size) : ptr(ptr), length(size) {}
 	span(T* begin, T* end) : ptr(begin), length(std::distance(begin, end)) {}
 	template <typename It>
@@ -91,16 +90,13 @@ constexpr std::ptrdiff_t ssize(const T(&)[N]) {
 }
 
 template <typename T>
-constexpr int bit_width(T value) {
+constexpr int bit_width(T number) {
 	static_assert(std::is_integral<T>::value && std::is_unsigned<T>::value,
 		"bit_width requires an unsigned integral type");
 
-	int width = 0;
-	while (value != 0) {
-		value >>= 1;
-		++width;
-	}
-	return width;
+   int result = 0;
+   for (; number > 0; number >>= 1, result++);
+   return result;
 }
 } // end namespace std
 #endif // ! EZGZ_HAS_CPP20
