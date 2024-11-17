@@ -37,19 +37,19 @@ namespace std {
 template <typename T>
 class span {
 public:
-	span() : ptr(nullptr), sz(0) {}
-	span(T* ptr, std::size_t sz) : ptr(ptr), sz(sz) {}
-	span(T* begin, T* end) : ptr(begin), sz(std::distance(begin, end)) {}
+	span() : ptr(nullptr), size(0) {}
+	span(T* ptr, std::size_t size) : ptr(ptr), size(size) {}
+	span(T* begin, T* end) : ptr(begin), size(std::distance(begin, end)) {}
 	template <typename It>
-	span(It begin, It end) : ptr(begin == end ? nullptr : &(*begin)), sz(std::distance(begin, end)) {}
+	span(It begin, It end) : ptr(begin == end ? nullptr : &(*begin)), size(std::distance(begin, end)) {}
 
     template <std::size_t N>
-	span(const std::array<std::remove_const_t<T>, N>& arr) : ptr(arr.data()), sz(N) {}
+	span(const std::array<std::remove_const_t<T>, N>& arr) : ptr(arr.data()), size(N) {}
 
 	T* data() { return ptr; }
 	const T* data() const { return ptr; }
 
-	std::size_t size() const { return sz; }
+	std::size_t size() const { return size; }
  
     using iterator = const T*;
     using const_iterator = const T*;
@@ -57,21 +57,21 @@ public:
 	iterator begin() { return ptr; }
 	const_iterator begin() const { return ptr; }
 
-	iterator end() { return ptr + sz; }
-	const_iterator end() const { return ptr + sz; }
+	iterator end() { return ptr + size; }
+	const_iterator end() const { return ptr + size; }
 
     span subspan(std::size_t offset, std::size_t count = std::size_t(-1)) const {
-		if (offset >= sz) {
+		if (offset >= size) {
             return span(); // Return an empty span if offset is out of bounds
         }
-		return span(ptr + offset, std::min(count, sz - offset));
+		return span(ptr + offset, std::min(count, size - offset));
     }
 
 	const T& operator[](std::size_t index) const { return ptr[index]; }
 
 private:
 	T* ptr;
-	std::size_t sz;
+	std::size_t size;
 };
 
 template <typename T>
@@ -85,18 +85,6 @@ constexpr std::ptrdiff_t ssize(const T(&)[N]) {
     return static_cast<std::ptrdiff_t>(N);
 }
 
-template <typename T>
-constexpr int bit_width(T value) {
-    static_assert(std::is_integral<T>::value && std::is_unsigned<T>::value, 
-                  "bit_width requires an unsigned integral type");
-
-    int width = 0;
-    while (value != 0) {
-        value >>= 1;
-        ++width;
-    }
-    return width;
-}
 } // end namespace std
 #endif // ! EZGZ_HAS_CPP20
 
@@ -136,16 +124,17 @@ concept DecompressionSettings = std::constructible_from<typename T::Checksum> &&
 	int(checksum(std::span<const uint8_t>()));
 	bool(T::verifyChecksum);
 };
+#else
+#define DecompressionSettings typename
+#endif
 
+#if EZGZ_HAS_CONCEPTS
 template <typename T>
 concept BasicStringType = std::constructible_from<T> && requires(T value) {
 	value += 'a';
 	std::string_view(value);
 };
 #else
-#define StreamSettings typename
-#define InputStreamSettings typename
-#define DecompressionSettings typename
 #define BasicStringType typename
 #endif
 
@@ -1876,7 +1865,7 @@ concept CompressionSettings = std::constructible_from<typename T::Checksum> && I
 	int(T::HuffmanSectionSize);
 };
 #else
-#define CompressionSettings typename
+#define ComressionSettings typename
 #endif
 
 struct DefaultCompressionSettings {
@@ -2505,8 +2494,6 @@ using OGzStream = BasicOGzStream<>;
 } // namespace EzGz
 
 #if ! EZGZ_HAS_CONCEPTS
-#undef StreamSettings
-#undef InputStreamSettings
 #undef DecompressionSettings
 #undef BasicStringType
 #undef ByteReader
