@@ -1716,7 +1716,6 @@ public:
 				usesDynamic = (dynamicLength < counts.staticLength);
 				total = std::min(dynamicLength, counts.staticLength);
 			}
-			Block& operator=(const Block& other) = default;
 
 			void writeOut(BitOutput<OutputSettings, NoChecksum>& bitOutput) {
 				if (!enabled) {
@@ -1810,7 +1809,7 @@ public:
 			}
 		};
 
-		constexpr static int BlockCount = std::max(section.MaxSize / BlockSize, 1);
+		constexpr static int BlockCount = std::max(DeduplicatedStream<DeduplicatedSettings>::Section::MaxSize / BlockSize, 1);
 		int previousEnd = 0;
 		std::array<Block, BlockCount> blocks = ArrayFiller([&] (int index) -> Block {
 			int end = (index + 1) * BlockSize;
