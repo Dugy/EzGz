@@ -15,6 +15,7 @@ static_assert(__cplusplus >= 201703L, "C++17 or higher is required");
 #include <span>
 #include <bit>
 #endif
+#include <algorithm>
 #include <charconv>
 #include <bit>
 #include <vector>
@@ -402,7 +403,7 @@ public:
 			memmove(buffer.data(), buffer.data() + offset, filled);
 			position -= offset;
 		}
-		return std::span<uint8_t>(buffer.begin() + filled, buffer.end());
+		return buffer.subspan(filled);
 	}
 
 	int doneFilling(int added) {
@@ -601,7 +602,7 @@ public:
 			return position == std::ssize(section);
 		}
 		int endPosition() const {
-			return std::ssize(section);
+			return int(std::ssize(section));
 		}
 
 		constexpr static int MaxSize = Settings::maxSize;
@@ -651,7 +652,7 @@ public:
 		ensureSize(4);
 
 		if (length <= 10) {
-			add(254 + length);
+			add(int16_t(254 + length));
 			add(-1);
 		} else if (length == maximumCopyLength) {
 			add(285);
@@ -662,12 +663,12 @@ public:
 			int suffixWidth = width - 3;
 			int prefix = modifiedLength >> suffixWidth;
 			int code = 257 + prefix + (suffixWidth << 2);
-			add(code);
-			add(-modifiedLength);
+			add(int16_t(code));
+			add(-int16_t(modifiedLength));
 		}
 
 		if (distance <= 4) {
-			add(-distance);
+			add(int16_t(-distance));
 			add(-1);
 		} else {
 			unsigned int modifiedDistance = distance - 1;
@@ -675,8 +676,8 @@ public:
 			int suffixWidth = width - 2;
 			int prefix = modifiedDistance >> suffixWidth;
 			int code = prefix + (suffixWidth << 1);
-			add(-code - 1);
-			add(-modifiedDistance);
+			add(int16_t(- code - 1));
+			add(-int16_t(modifiedDistance));
 		}
 	}
 
@@ -773,7 +774,7 @@ class BitOutput {
 
 	void doEmpty(int bytes) {
 		const char* dataAsBytes = reinterpret_cast<char*>(&data);
-		if constexpr (std::endian::native == std::endian::little) {
+		if constexpr (!IsBigEndian) {
 			std::array<char, 8> moved = {};
 			for (int i = 0; i < bytes; i++)
 				moved[i] = dataAsBytes[i];
@@ -901,7 +902,7 @@ public:
 							codes[i].start = reversedBytes[firstPart];
 							for (int code = codes[i].start >> (8 - size); code < std::ssize(codesIndex); code += (1 << size)) {
 								codesIndex[code].word = int16_t(i);
-								codesIndex[code].length = int16_t(size);
+								codesIndex[code].length = int8_t(size);
 								codesIndex[code].valid = true;
 							}
 						} else {
@@ -1002,19 +1003,19 @@ class MultiIndexBloomFilter {
 
 		void moveBack(int offset) {
 			for (IndexType& position : positions) {
-				position -= offset;
+				position -= IndexType(offset);
 			}
 		}
 	};
 	std::array<LookbackIndex, IndexLengths.size()> lookbackIndexes = ArrayFiller([] (int index) constexpr {
-		if constexpr (std::endian::native == std::endian::little)
+		if constexpr (!IsBigEndian)
 			return LookbackIndex{{}, 0xffffffffffffffff >> ((8 - IndexLengths[index]) * 8)};
 		else
 			return LookbackIndex{{}, 0xffffffffffffffff << ((8 - IndexLengths[index]) * 8)};
 	});
 
 	template <int Index> // Just check if we aren't indexing something that doesn't fit the numeric type
-	static bool checkIfNoneGreaterThanEight() {
+	constexpr static bool checkIfNoneGreaterThanEight() {
 		if constexpr(Index < std::ssize(IndexLengths)) {
 			static_assert(IndexLengths[Index] <= 8, "We can't have longer indexes than 8 bytes with uint64_t as pseudohash");
 			return checkIfNoneGreaterThanEight<Index + 1>();
@@ -1031,7 +1032,7 @@ public:
 	}
 
 	std::pair<IndexType, int> locate(uint64_t sequence) {
-		int position = input.getPosition() - 1;
+		IndexType position = IndexType(input.getPosition() - 1);
 		IndexType location = 0;
 		int matchLength = 0;
 		for (int index = std::ssize(IndexLengths) - 1; index >= 0; index--) {
@@ -1051,7 +1052,7 @@ public:
 				}
 				break;
 			}
-			lookbackIndexes[index].positions[sequenceHash] = position;
+			lookbackIndexes[index].positions[sequenceHash] = static_cast<std::remove_reference_t<decltype(lookbackIndexes[0].positions[0])>>(position);
 		}
 		return {position, 0};
 	}
@@ -1075,7 +1076,7 @@ public:
 			uint64_t sequence = input.getEightBytesFromCurrentPosition();
 			// Shift positions int the map to the new offset
 			if (input.getPositionStart() != positionStart) [[unlikely]] {
-				int newStart = input.getPositionStart();
+				int newStart = int(input.getPositionStart());
 				int shift = newStart - positionStart;
 				search.moveBack(shift);
 				positionStart = newStart;
@@ -1204,7 +1205,7 @@ class DeflateReader {
 					CopyState::copy(parent->output, length, distance);
 				} else {
 					if (code.code < 144) {
-						parent->output.addByte(code.code);
+						parent->output.addByte(char(code.code));
 					} else {
 						uint8_t full = uint8_t((((code.code - 144)) << 1) + 144 + input.getBits(1));
 						parent->output.addByte(full);
@@ -1236,7 +1237,7 @@ class DeflateReader {
 			while (parent->output.available()) {
 				int word = codes.readWord();
 				if (word < 256) {
-					parent->output.addByte(word);
+					parent->output.addByte(char(word));
 				} else if (word == 256) [[unlikely]] {
 					break;
 				} else {
@@ -1383,7 +1384,7 @@ class HuffmanWriter {
 		})) {}
 		struct UseDefaultDistanceEncoding {};
 		constexpr HuffmanTable(UseDefaultDistanceEncoding) : codes(ArrayFiller([] (int index) {
-			return Entry(29 - index, 5);
+			return Entry(uint16_t(29 - index), 5);
 		})) {}
 
 
@@ -1514,7 +1515,7 @@ class HuffmanWriter {
 					});
 				}
 				for (int i = sameLengthRangeBegin; i < sameLengthRangeEnd; i++) {
-					made.codes[sortedCounts[i].index] = typename HuffmanTable<Size>::Entry(currentCode, sortedCounts[i].length);
+					made.codes[sortedCounts[i].index] = typename HuffmanTable<Size>::Entry(currentCode, uint8_t(sortedCounts[i].length));
 					currentCode += 1;
 				}
 				sameLengthRangeBegin = sameLengthRangeEnd;
@@ -1619,7 +1620,7 @@ public:
 				words++;
 
 				// We'll need to stop writing lengths from some point
-				for (int i = std::ssize(wordCounts.counts) - 1; i > 257; i--) {
+				for (int i = int(std::ssize(wordCounts.counts)) - 1; i > 257; i--) {
 					if (wordCounts.counts[i].count != 0) {
 						lengthsAfter256 = i - 256;
 						break;
@@ -1643,7 +1644,7 @@ public:
 				for (int i = 0; i <= 256 + lengthsAfter256; i++) {
 					wordCounts.counts[i].count = first.wordCounts.counts[i].count + second.wordCounts.counts[i].count;
 				}
-				for (int i = std::ssize(distanceCounts.counts) - 1; i >= lowestDistanceWord; i--) {
+				for (int i = int(std::ssize(distanceCounts.counts) - 1); i >= lowestDistanceWord; i--) {
 					distanceCounts.counts[i].count = first.distanceCounts.counts[i].count + second.distanceCounts.counts[i].count;
 				}
 
@@ -1657,7 +1658,7 @@ public:
 
 			bool enabled = true;
 			bool last = false;
-			Counts counts = {};
+			Counts counts;
 			int startPos = 0;
 			int endPos = 0;
 			int total = 0;
@@ -1704,7 +1705,6 @@ public:
 				usesDynamic = (dynamicLength < counts.staticLength);
 				total = std::min(dynamicLength, counts.staticLength);
 			}
-			Block& operator=(const Block& other) = default;
 
 			void writeOut(BitOutput<OutputSettings, NoChecksum>& bitOutput) {
 				if (!enabled) {
@@ -1798,7 +1798,7 @@ public:
 			}
 		};
 
-		constexpr static int BlockCount = std::max(section.MaxSize / BlockSize, 1);
+		constexpr static int BlockCount = std::max(DeduplicatedStream<DeduplicatedSettings>::Section::MaxSize / BlockSize, 1);
 		int previousEnd = 0;
 		std::array<Block, BlockCount> blocks = ArrayFiller([&] (int index) -> Block {
 			int end = (index + 1) * BlockSize;
@@ -1955,7 +1955,7 @@ std::vector<uint8_t> writeDeflateIntoVector(std::function<int(std::span<char> ba
 template <CompressionSettings Settings>
 std::vector<uint8_t> writeDeflateIntoVector(std::span<const char> allData) {
 	return writeDeflateIntoVector<Settings>([allData, position = 0] (std::span<char> toFill) mutable -> int {
-		int filling = std::min(allData.size() - position, toFill.size());
+		int filling = std::min(int(allData.size() - position), int(toFill.size()));
 		if(filling != 0)
 			memcpy(toFill.data(), &allData[position], filling);
 		position += filling;
@@ -1999,7 +1999,7 @@ public:
 #endif
 
 	IDeflateArchive(std::span<const uint8_t> data) : input([data] (std::span<uint8_t> batch) mutable {
-		int copying = std::min(batch.size(), data.size());
+		int copying = int(std::min(batch.size(), data.size()));
 		if (copying == 0) {
 			return 0;
 		}
@@ -2134,7 +2134,7 @@ public:
 		while (position < std::ssize(section)) {
 			bool doDeduplicate = false;
 			input.refillSome([&] (std::span<uint8_t> outSection) -> int {
-				int copied = std::min<int>(section.size() - position, outSection.size());
+				int copied = std::min(int(section.size() - position), int(outSection.size()));
 				doDeduplicate = (std::ssize(outSection) <= std::ssize(section) * 0.8);
 				memcpy(outSection.data(), section.data() + position, copied);
 				position += copied;
@@ -2197,7 +2197,7 @@ enum class CreatingOperatingSystem {
 // File information in the .gz file
 template <BasicStringType StringType>
 struct GzFileInfo {
-	int32_t modificationTime = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+	int32_t modificationTime = int32_t(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
 	CreatingOperatingSystem operatingSystem = CreatingOperatingSystem::OTHER;
 	bool fastestCompression = false;
 	bool densestCompression = false;
@@ -2362,8 +2362,8 @@ class OGzFile : public ODeflateArchive<Settings, FastCrc32> {
 				memcpy(bytes.data(), &value, bytes.size());
 				ODeflateArchive<Settings, FastCrc32>::output.addBytes(bytes);
 			};
-			writeInteger(ODeflateArchive<Settings, FastCrc32>::input.checksum());
-			writeInteger(ODeflateArchive<Settings, FastCrc32>::input.getPosition() + ODeflateArchive<Settings, FastCrc32>::input.getPositionStart());
+			writeInteger(uint32_t(ODeflateArchive<Settings, FastCrc32>::input.checksum()));
+			writeInteger(uint32_t(ODeflateArchive<Settings, FastCrc32>::input.getPosition() + ODeflateArchive<Settings, FastCrc32>::input.getPositionStart()));
 		});
 	}
 
@@ -2424,7 +2424,7 @@ class OGzStreamBuffer : public std::streambuf {
 		setp(reinterpret_cast<char*>(range.data()), reinterpret_cast<char*>(range.data()) + range.size());
 	}
 	void clearBuffer() {
-		writeBuffer.finish(pptr() - pbase());
+		writeBuffer.finish(int(pptr() - pbase()));
 	}
 public:
 
@@ -2443,7 +2443,7 @@ public:
 	int_type overflow(int_type added) override {
 		clearBuffer();
 		prepareBuffer();
-		writeBuffer.accessRange()[0] = added;
+		writeBuffer.accessRange()[0] = static_cast<std::remove_reference_t<decltype(writeBuffer.accessRange()[0])>>(added);
 		pbump(1);
 		return 0;
 	}
