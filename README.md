@@ -2,7 +2,7 @@
 A single header library for easily and quickly decompressing Gz archives, written in modern C++. It's designed to be both easy to use and highly performant.
 
 ## Installation
-Just add `ezgz.hpp` into your project, it contains all the functionality and depends only on the C++20 standard library (it will also run on C++17). You can use git subtree to get updates cleanly.
+Just add `ezgz.hpp` into your project, it contains all the functionality and depends only on the C++20 standard library (it will also run on C++17, but with some compromises). You can use git subtree to get updates cleanly.
 
 ## Usage
 ### Decompression
@@ -73,7 +73,7 @@ std::vector<char> decompressed = Ezgz::IGzFile<Settings>("data.gz").readAll();
 If including `fstream` is undesirable, the `EZGZ_NO_FILE` macro can be defined to remove the constructors that accept file names. This does not restrict usability much.
 
 ### Compression (experimental)
-The implementation of compression is slower and has worse ratios than zlib because of known inefficiencies in some algorithms. Working on improvements. It can still provide some utility.
+The implementation of compression has worse ratios than zlib but is faster. Working on improvements. It can still provide some utility.
 
 You can use it this way:
 ```C++

@@ -36,6 +36,6 @@ int main(int argc, char** argv) {
 
 	ssize_t outputSize = std::filesystem::file_size(inputName + ".gz");
 	std::cout << "Compression ratio was " << (float(outputSize) / inputSize * 100) << "%" << std::endl;
-	std::cout << "Compressed the data to size " << outputSize << " bytes at speed " << ((float(outputSize) / (1024 * 1024)) / (float(duration.count()) / 1000000)) << " MiB/s" << std::endl;
+    std::cout << "Compressed the data to size " << outputSize << " bytes at speed " << ((float(inputSize) / (1024 * 1024)) / (float(duration.count()) / 1000000)) << " MiB/s" << std::endl;
 
 }

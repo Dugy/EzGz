@@ -98,6 +98,20 @@ constexpr int bit_width(T number) {
    for (; number > 0; number >>= 1, result++);
    return result;
 }
+
+template <typename T>
+int countr_zero(T num) {
+	int result = sizeof(T) * 8;
+	for (; num != 0; num <<= 1, result--);
+	return result;
+}
+
+template <typename T>
+int countl_zero(T num) {
+	int result = sizeof(T) * 8;
+	for (; num != 0; num >>= 1, result--);
+	return result;
+}
 } // end namespace std
 #endif // ! EZGZ_HAS_CPP20
 
@@ -1007,69 +1021,68 @@ concept DeduplicatingSearch = requires(Index index, Detail::ByteInput& input, in
 #define DeduplicatingSearch typename
 #endif
 
-template <int IndexLength = 31237, int IndexLengthSize = 3, int ChunkSize = 30000, typename IndexType = uint16_t>
-class MultiIndexBloomFilter {
-	constexpr static std::array<int, 3> indexLengths = {4, 6, 8};
-	ByteInput& input;
-
-	struct LookbackIndex {
-		std::array<IndexType, IndexLength> positions = {};
-		uint64_t mask = 0;
-
-		void moveBack(int offset) {
-			for (IndexType& position : positions) {
-				position -= IndexType(offset);
-			}
-		}
+template <int Bits = 16, int HistorySize = 2, int ChunkSize = 30000>
+class DeduplicationBloomFilter {
+	constexpr static int IndexSize = 1u << Bits;
+	struct Entry {
+		ptrdiff_t location = std::numeric_limits<ptrdiff_t>::min();
+		uint64_t sequence = 0;
 	};
-	std::array<LookbackIndex, IndexLengthSize> lookbackIndexes = ArrayFiller([] (int index) constexpr {
-		if constexpr (!IsBigEndian)
-			return LookbackIndex{{}, 0xffffffffffffffff >> ((8 - indexLengths[index]) * 8)};
-		else
-			return LookbackIndex{{}, 0xffffffffffffffff << ((8 - indexLengths[index]) * 8)};
-	});
-
-	template <int Index> // Just check if we aren't indexing something that doesn't fit the numeric type
-	constexpr static bool checkIfNoneGreaterThanEight() {
-		if constexpr(Index < IndexLengthSize) {
-			static_assert(indexLengths[Index] <= 8, "We can't have longer indexes than 8 bytes with uint64_t as pseudohash");
-			return checkIfNoneGreaterThanEight<Index + 1>();
-		} else return true;
-	}
-	constexpr static bool noneGreaterThanEight = checkIfNoneGreaterThanEight<0>();
+	std::array<std::array<Entry, HistorySize>, IndexSize> index = {};
+	ByteInput& input;
+	ptrdiff_t start = input.getPositionStart();
 
 public:
-	MultiIndexBloomFilter(ByteInput& input) : input(input) {}
+	DeduplicationBloomFilter(ByteInput& input) : input(input) {}
 
 	void moveBack(int shift) {
-		for (auto& index : lookbackIndexes)
-			index.moveBack(shift);
+		start += shift;
 	}
 
-	std::pair<IndexType, int> locate(uint64_t sequence) {
-		IndexType position = IndexType(input.getPosition() - 1);
-		IndexType location = 0;
-		int matchLength = 0;
-		for (int index = IndexLengthSize - 1; index >= 0; index--) {
-			uint64_t trimmedSequence = sequence & lookbackIndexes[index].mask;
-			int sequenceHash = trimmedSequence % IndexLength;
-			location = lookbackIndexes[index].positions[sequenceHash];
-			if (location >= position) { // Clearly bad data
-				continue;
-			}
-			uint64_t there = input.getEightBytesAtPosition(location);
-			there &= lookbackIndexes[index].mask;
-			if (there == trimmedSequence) {
-				for (matchLength = indexLengths[index]; matchLength < maximumCopyLength; matchLength++) { // TODO: Don't go past end
-					if (input.getAtPosition(location + matchLength) != input.getAtPosition(position + matchLength)) {
-						return {location, matchLength};
-					}
+	std::pair<ptrdiff_t, int> locate(uint64_t sequence) {
+		ptrdiff_t position = input.getPosition() - 1;
+		int oldest = 0;
+		ptrdiff_t oldestEntry = std::numeric_limits<ptrdiff_t>::max();
+		int bestMatch = 0;
+		ptrdiff_t bestMatchLocation = 0;
+		{
+			constexpr uint64_t Mask = (!IsBigEndian) ? ~(0xffffffffffffffff << Bits) : ~(0xffffffffffffffff >> Bits);
+			uint64_t prefix = (!IsBigEndian) ? sequence & Mask : (sequence & Mask) >> (64 - Bits);
+			static_assert((!IsBigEndian) ? (~(0xffffffffffffffff << Bits) < IndexSize) : (0xffffffffffffffff >> (64 - Bits) < IndexSize));
+			std::array<Entry, HistorySize>& results = index[prefix];
+			for (int i = 0; i < std::ssize(results); i++) {
+				if (results[i].location < oldestEntry) {
+					oldest = i;
+					oldestEntry = results[i].location;
 				}
-				break;
+				if (results[i].location < input.getPositionStart()) {
+					continue;
+				}
+				uint64_t mismatch = results[i].sequence ^ sequence;
+				int matchLength = (!IsBigEndian) ? std::countr_zero(mismatch) : std::countl_zero(mismatch);
+				if (bestMatch < matchLength) {
+					bestMatch = matchLength;
+					bestMatchLocation = results[i].location;
+				}
 			}
-			lookbackIndexes[index].positions[sequenceHash] = static_cast<std::remove_reference_t<decltype(lookbackIndexes[0].positions[0])>>(position);
+			results[oldest].location = position + start;
+			results[oldest].sequence = sequence;
 		}
-		return {position, 0};
+		bestMatchLocation -= start;
+
+		if (bestMatch == 64) { // Everything in the sequence matches
+			int matchLength = 8;
+			for ( ; matchLength < maximumCopyLength; matchLength++) { // TODO: Don't go past end
+				if (input.getAtPosition(bestMatchLocation + matchLength) != input.getAtPosition(position + matchLength)) {
+					return {bestMatchLocation, matchLength};
+				}
+			}
+			return {bestMatchLocation, matchLength};
+		} else if (bestMatch >= 24) { // 3 bytes are enough to write a duplication
+			return {bestMatchLocation, bestMatch / 8};
+		} else { // No match
+			return {position, 0};
+		}
 	}
 };
 
@@ -1103,10 +1116,6 @@ public:
 			std::tie(location, matchLength) = search.locate(sequence);
 			matchLength = std::min(matchLength, input.availableAhead());
 			if (matchLength >= 3) {
-				std::string copied;
-				for (int i = 0; i < matchLength; i++) {
-					copied += input.getAtPosition(location + i);
-				}
 				output.addDuplication(matchLength, position - location);
 				input.advancePosition(matchLength - 1);
 			} else {
@@ -1900,7 +1909,7 @@ struct DefaultCompressionSettings {
 
 	constexpr static int HuffmanSectionSize = 1000000;
 	using Checksum = FastCrc32;
-	using DeduplicationIndex = Detail::MultiIndexBloomFilter<>;
+    using DeduplicationIndex = Detail::DeduplicationBloomFilter<>;
 };
 
 struct BestCompressionSettings : DefaultCompressionSettings {
