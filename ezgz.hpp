@@ -53,7 +53,7 @@ public:
 	const T* data() const { return ptr; }
 
 	std::size_t size() const { return length; }
- 
+
 	using iterator = T*;
     using const_iterator = const T*;
 
@@ -65,8 +65,8 @@ public:
 
     span subspan(std::size_t offset, std::size_t count = std::size_t(-1)) const {
 		if (offset >= length) {
-            return span(); // Return an empty span if offset is out of bounds
-        }
+	    return span(); // Return an empty span if offset is out of bounds
+	}
 		return span(ptr + offset, std::min(count, length - offset));
     }
 
@@ -186,6 +186,11 @@ struct MinDecompressionSettings {
 	using Checksum = NoChecksum;
 	constexpr static bool verifyChecksum = false;
 	using StringType = std::string;
+};
+
+enum DeduplicationSettings : uint32_t {
+	INDEX_DUPLICATES = 0x1,
+	INCLUDE_SMALL_DUPLICATES = 0x2,
 };
 
 namespace Detail {
@@ -589,6 +594,7 @@ public:
 };
 
 constexpr int maximumCopyLength = 258;
+constexpr int maximumCopyDistance = 32768;
 
 template <StreamSettings Settings>
 class DeduplicatedStream {
@@ -1012,25 +1018,74 @@ auto ByteInput::encodedTable(int realSize, const std::array<uint8_t, 256>& codeC
 
 #if EZGZ_HAS_CONCEPTS
 template <typename Index>
-concept DeduplicatingSearch = requires(Index index, Detail::ByteInput& input, int distance, int length, uint64_t sequence, int offset) {
+concept DeduplicatingSearch = requires(Index index, Detail::ByteInput& input, ptrdiff_t position, int distance, int length, uint64_t sequence, int offset) {
 	Index(input);
-	std::tie(distance, length) = index.locate(sequence);
+	std::tie(distance, length) = index.indexValueAndLocateBestMatch(position, sequence);
+	index.indexValue(position, sequence);
 	index.moveBack(offset);
 };
 #else
 #define DeduplicatingSearch typename
 #endif
 
-template <int Bits = 16, int HistorySize = 2, int ChunkSize = 30000>
+template <int Bits = 16, int HistorySize = 2>
 class DeduplicationBloomFilter {
 	constexpr static int IndexSize = 1u << Bits;
-	struct Entry {
+	struct RepetitionEntry {
 		ptrdiff_t location = std::numeric_limits<ptrdiff_t>::min();
 		uint64_t sequence = 0;
 	};
-	std::array<std::array<Entry, HistorySize>, IndexSize> index = {};
+	struct Entry {
+		std::array<RepetitionEntry, HistorySize> repetitions = {};
+		void indexValue(uint64_t sequence, ptrdiff_t position) {
+			int oldest = 0;
+			ptrdiff_t oldestEntry = std::numeric_limits<ptrdiff_t>::max();
+			for (int i = 0; i < std::ssize(repetitions); i++) {
+				if (repetitions[i].location < oldestEntry) {
+					oldest = i;
+					oldestEntry = repetitions[i].location;
+				}
+			}
+			repetitions[oldest].location = position;
+			repetitions[oldest].sequence = sequence;
+		}
+		std::pair<int, ptrdiff_t> indexValueAndLocateBestMatch(uint64_t sequence, ptrdiff_t earliestPosition, ptrdiff_t position) {
+			int oldest = 0;
+			ptrdiff_t oldestEntry = std::numeric_limits<ptrdiff_t>::max();
+			int bestMatch = 0;
+			ptrdiff_t bestMatchLocation = 0;
+			for (int i = 0; i < std::ssize(repetitions); i++) {
+				if (repetitions[i].location < oldestEntry) {
+					oldest = i;
+					oldestEntry = repetitions[i].location;
+				}
+				if (std::max(repetitions[i].location, position - maximumCopyDistance) < earliestPosition) {
+					continue;
+				}
+				uint64_t mismatch = repetitions[i].sequence ^ sequence;
+				int matchLength = (!IsBigEndian) ? std::countr_zero(mismatch) : std::countl_zero(mismatch);
+				matchLength /= 8;
+				if (matchLength > bestMatch) {
+					bestMatch = matchLength;
+					bestMatchLocation = repetitions[i].location;
+				}
+			}
+			repetitions[oldest].location = position;
+			repetitions[oldest].sequence = sequence;
+			return {bestMatch, bestMatchLocation};
+		}
+	};
+
+	std::array<Entry, IndexSize> index = {};
 	ByteInput& input;
 	ptrdiff_t start = input.getPositionStart();
+
+	Entry& getEntry(uint64_t sequence) {
+		constexpr uint64_t Mask = (!IsBigEndian) ? ~(0xffffffffffffffff << Bits) : ~(0xffffffffffffffff >> Bits);
+		uint64_t prefix = (!IsBigEndian) ? sequence & Mask : (sequence & Mask) >> (64 - Bits);
+		static_assert((!IsBigEndian) ? (~(0xffffffffffffffff << Bits) < IndexSize) : (0xffffffffffffffff >> (64 - Bits) < IndexSize));
+		return index[prefix];
+	}
 
 public:
 	DeduplicationBloomFilter(ByteInput& input) : input(input) {}
@@ -1039,54 +1094,30 @@ public:
 		start += shift;
 	}
 
-	std::pair<ptrdiff_t, int> locate(uint64_t sequence) {
-		ptrdiff_t position = input.getPosition() - 1;
-		int oldest = 0;
-		ptrdiff_t oldestEntry = std::numeric_limits<ptrdiff_t>::max();
-		int bestMatch = 0;
-		ptrdiff_t bestMatchLocation = 0;
-		{
-			constexpr uint64_t Mask = (!IsBigEndian) ? ~(0xffffffffffffffff << Bits) : ~(0xffffffffffffffff >> Bits);
-			uint64_t prefix = (!IsBigEndian) ? sequence & Mask : (sequence & Mask) >> (64 - Bits);
-			static_assert((!IsBigEndian) ? (~(0xffffffffffffffff << Bits) < IndexSize) : (0xffffffffffffffff >> (64 - Bits) < IndexSize));
-			std::array<Entry, HistorySize>& results = index[prefix];
-			for (int i = 0; i < std::ssize(results); i++) {
-				if (results[i].location < oldestEntry) {
-					oldest = i;
-					oldestEntry = results[i].location;
-				}
-				if (results[i].location < input.getPositionStart()) {
-					continue;
-				}
-				uint64_t mismatch = results[i].sequence ^ sequence;
-				int matchLength = (!IsBigEndian) ? std::countr_zero(mismatch) : std::countl_zero(mismatch);
-				if (bestMatch < matchLength) {
-					bestMatch = matchLength;
-					bestMatchLocation = results[i].location;
-				}
-			}
-			results[oldest].location = position + start;
-			results[oldest].sequence = sequence;
-		}
+	void indexValue(ptrdiff_t position, uint64_t sequence) {
+		getEntry(sequence).indexValue(sequence, position + start);
+	}
+
+	std::pair<ptrdiff_t, int> indexValueAndLocateBestMatch(ptrdiff_t position, uint64_t sequence) {
+		auto [bestMatch, bestMatchLocation] = getEntry(sequence).indexValueAndLocateBestMatch(sequence, input.getPositionStart(), position + start);
 		bestMatchLocation -= start;
 
-		if (bestMatch == 64) { // Everything in the sequence matches
-			int matchLength = 8;
-			for ( ; matchLength < maximumCopyLength; matchLength++) { // TODO: Don't go past end
-				if (input.getAtPosition(bestMatchLocation + matchLength) != input.getAtPosition(position + matchLength)) {
-					return {bestMatchLocation, matchLength};
+		if (bestMatch == 8) { // Everything in the sequence matches
+			for ( ; bestMatch < maximumCopyLength; bestMatch++) { // TODO: Don't go past end
+				if (input.getAtPosition(bestMatchLocation + bestMatch) != input.getAtPosition(position + bestMatch)) {
+					return {bestMatchLocation, bestMatch};
 				}
 			}
-			return {bestMatchLocation, matchLength};
-		} else if (bestMatch >= 24) { // 3 bytes are enough to write a duplication
-			return {bestMatchLocation, bestMatch / 8};
+			return {bestMatchLocation, bestMatch};
+		} else if (bestMatch >= 3) { // 3 bytes are enough to write a duplication
+			return {bestMatchLocation, bestMatch};
 		} else { // No match
 			return {position, 0};
 		}
 	}
 };
 
-template <StreamSettings DeduplicatedSettings, DeduplicatingSearch DuplicationIndex>
+template <StreamSettings DeduplicatedSettings, DeduplicatingSearch DuplicationIndex, DeduplicationSettings deduplicationSettings>
 class Deduplicator {
 
 	int positionStart = 0;
@@ -1113,11 +1144,26 @@ public:
 			int position = input.getPosition() - 1;
 			int location = 0;
 			int matchLength = 0;
-			std::tie(location, matchLength) = search.locate(sequence);
+			std::tie(location, matchLength) = search.indexValueAndLocateBestMatch(position, sequence);
 			matchLength = std::min(matchLength, input.availableAhead());
-			if (matchLength >= 3) {
-				output.addDuplication(matchLength, position - location);
+			int distance = position - location;
+			auto addDuplication = [&] {
+				if constexpr(deduplicationSettings & INDEX_DUPLICATES) {
+					for (ptrdiff_t indexingAt = position + 1; indexingAt < position + matchLength - 1; indexingAt++) {
+						search.indexValue(indexingAt, input.getEightBytesAtPosition(indexingAt));
+					}
+				}
+				output.addDuplication(matchLength, distance);
 				input.advancePosition(matchLength - 1);
+			};
+			if constexpr(deduplicationSettings & INCLUDE_SMALL_DUPLICATES) {
+				if (matchLength == 3 && distance < 64) {
+					addDuplication();
+					continue;
+				}
+			}
+			if (matchLength >= 4) {
+				addDuplication();
 			} else {
 				output.addByte(input.getAtPosition(position));
 			}
@@ -1887,6 +1933,7 @@ concept CompressionSettings = std::constructible_from<typename T::Checksum> && I
 	int(checksum());
 	int(checksum(std::span<const uint8_t>()));
 	int(T::HuffmanSectionSize);
+	DeduplicationSettings(T::deduplicationSettings);
 };
 #else
 #define CompressionSettings typename
@@ -1908,8 +1955,9 @@ struct DefaultCompressionSettings {
 	};
 
 	constexpr static int HuffmanSectionSize = 1000000;
+	constexpr static DeduplicationSettings deduplicationSettings = DeduplicationSettings(INDEX_DUPLICATES | INCLUDE_SMALL_DUPLICATES);
 	using Checksum = FastCrc32;
-    using DeduplicationIndex = Detail::DeduplicationBloomFilter<>;
+	using DeduplicationIndex = Detail::DeduplicationBloomFilter<>;
 };
 
 struct BestCompressionSettings : DefaultCompressionSettings {
@@ -1958,7 +2006,7 @@ std::vector<uint8_t> writeDeflateIntoVector(std::function<int(std::span<char> ba
 			return readMoreFunction(std::span<char>(reinterpret_cast<char*>(batch.data()), batch.size()));
 		});
 		Detail::DeduplicatedStream<typename Settings::DeduplicationProperties> deduplicated(connector);
-		Detail::Deduplicator<typename Settings::DeduplicationProperties, typename Settings::DeduplicationIndex> deduplicator(input, deduplicated);
+		Detail::Deduplicator<typename Settings::DeduplicationProperties, typename Settings::DeduplicationIndex, Settings::deduplicationSettings> deduplicator(input, deduplicated);
 
 		do {
 			deduplicator.deduplicateSome();
@@ -2110,7 +2158,7 @@ private:
 		writer.writeBatch(section, lastCall);
 		return section.position;
 	}};
-	Detail::Deduplicator<typename Settings::DeduplicationProperties, typename Settings::DeduplicationIndex> deduplicator = {input, deduplicated};
+	Detail::Deduplicator<typename Settings::DeduplicationProperties, typename Settings::DeduplicationIndex, Settings::deduplicationSettings> deduplicator = {input, deduplicated};
 
 	void consume() {
 		std::span<const char> batch = output.getBuffer();
