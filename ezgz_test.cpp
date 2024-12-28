@@ -601,7 +601,7 @@ int main(int, char**) {
 		};
 		{
 			Detail::DeduplicatedStream<TestStreamSettings<10, 4>> output(checker);
-			Detail::Deduplicator<TestStreamSettings<10, 4>, Detail::DeduplicationBloomFilter<>, INCLUDE_SMALL_DUPLICATES> deduplicator(byteReader, output);
+			Detail::Deduplicator<TestStreamSettings<10, 4>, Detail::PrefixBasedDuplicationIndex<Detail::RepetitionCircularBuffer<>>, INCLUDE_SMALL_DUPLICATES> deduplicator(byteReader, output);
 			deduplicator.deduplicateSome();
 		}
 	}
@@ -613,7 +613,7 @@ int main(int, char**) {
 		DeduplicationVerifier<TestStreamSettings<12, 5>> verifier;
 		{
 			Detail::DeduplicatedStream<TestStreamSettings<12, 5>> output(verifier.reader());
-			Detail::Deduplicator<TestStreamSettings<12, 5>, Detail::DeduplicationBloomFilter<>, INCLUDE_SMALL_DUPLICATES> deduplicator(byteReader, output);
+			Detail::Deduplicator<TestStreamSettings<12, 5>, Detail::PrefixBasedDuplicationIndex<Detail::RepetitionCircularBuffer<>>, INCLUDE_SMALL_DUPLICATES> deduplicator(byteReader, output);
 			deduplicator.deduplicateSome();
 		}
 		doATest(verifier.parsed, "abaabbbabaababbaababaaaabaaabbbbbaa");
@@ -627,7 +627,7 @@ int main(int, char**) {
 		DeduplicationVerifier<TestStreamSettings<10, 4>> verifier;
 		{
 			Detail::DeduplicatedStream<TestStreamSettings<10, 4>> output(verifier.reader());
-			Detail::Deduplicator<TestStreamSettings<10, 4>, Detail::DeduplicationBloomFilter<>, INCLUDE_SMALL_DUPLICATES> deduplicator(byteReader, output);
+			Detail::Deduplicator<TestStreamSettings<10, 4>, Detail::PrefixBasedDuplicationIndex<Detail::RepetitionCircularBuffer<>>, INCLUDE_SMALL_DUPLICATES> deduplicator(byteReader, output);
 			deduplicator.deduplicateSome();
 		}
 		doATest(verifier.parsed, "The main interesting thing about it is the deflate algorithm.");

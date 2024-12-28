@@ -9,6 +9,7 @@ static_assert(__cplusplus >= 201703L, "C++17 or higher is required");
 #define EZGZ_HAS_CPP20 (__cplusplus >= 202002L)
 #define EZGZ_HAS_CONCEPTS (__cpp_concepts >= 201907L)
 
+#include <deque>
 #include <array>
 #include <cstring>
 #if EZGZ_HAS_CPP20
@@ -188,7 +189,8 @@ struct MinDecompressionSettings {
 	using StringType = std::string;
 };
 
-enum DeduplicationSettings : uint32_t {
+enum DeduplicationFlags : uint32_t {
+	NO_DUPLICATION_FLAGS = 0x0,
 	INDEX_DUPLICATES = 0x1,
 	INCLUDE_SMALL_DUPLICATES = 0x2,
 };
@@ -1028,57 +1030,175 @@ concept DeduplicatingSearch = requires(Index index, Detail::ByteInput& input, pt
 #define DeduplicatingSearch typename
 #endif
 
-template <int Bits = 16, int HistorySize = 2>
-class DeduplicationBloomFilter {
-	constexpr static int IndexSize = 1u << Bits;
+struct LastRepetitionEntry {
+	struct Repository{};
+	ptrdiff_t location = std::numeric_limits<ptrdiff_t>::min();
+	uint64_t sequence = 0;
+	void indexValue(Repository&, uint64_t newSequence, ptrdiff_t position) {
+		location = position;
+		sequence = newSequence;
+	}
+	std::pair<int, ptrdiff_t> indexValueAndLocateBestMatch(Repository& repository, uint64_t newSequence, ptrdiff_t earliestPosition, ptrdiff_t position) {
+		uint64_t mismatch = sequence ^ newSequence;
+		int matchLength = (!IsBigEndian) ? std::countr_zero(mismatch) : std::countl_zero(mismatch);
+		ptrdiff_t oldLocation = location;
+		matchLength /= 8;
+		indexValue(repository, newSequence, position);
+		if (std::max(oldLocation, position - maximumCopyDistance) < earliestPosition) {
+			return {0, oldLocation};
+		}
+		return {matchLength, oldLocation};
+	}
+};
+
+template <int HistorySize = 2>
+struct RepetitionCircularBuffer {
 	struct RepetitionEntry {
 		ptrdiff_t location = std::numeric_limits<ptrdiff_t>::min();
 		uint64_t sequence = 0;
 	};
-	struct Entry {
-		std::array<RepetitionEntry, HistorySize> repetitions = {};
-		void indexValue(uint64_t sequence, ptrdiff_t position) {
-			int oldest = 0;
-			ptrdiff_t oldestEntry = std::numeric_limits<ptrdiff_t>::max();
-			for (int i = 0; i < std::ssize(repetitions); i++) {
-				if (repetitions[i].location < oldestEntry) {
-					oldest = i;
-					oldestEntry = repetitions[i].location;
-				}
+	struct Repository{};
+	std::array<RepetitionEntry, HistorySize> repetitions = {};
+	void indexValue(Repository&, uint64_t sequence, ptrdiff_t position) {
+		int oldest = 0;
+		ptrdiff_t oldestEntry = std::numeric_limits<ptrdiff_t>::max();
+		for (int i = 0; i < std::ssize(repetitions); i++) {
+			if (repetitions[i].location < oldestEntry) {
+				oldest = i;
+				oldestEntry = repetitions[i].location;
 			}
-			repetitions[oldest].location = position;
-			repetitions[oldest].sequence = sequence;
 		}
-		std::pair<int, ptrdiff_t> indexValueAndLocateBestMatch(uint64_t sequence, ptrdiff_t earliestPosition, ptrdiff_t position) {
-			int oldest = 0;
-			ptrdiff_t oldestEntry = std::numeric_limits<ptrdiff_t>::max();
-			int bestMatch = 0;
-			ptrdiff_t bestMatchLocation = 0;
-			for (int i = 0; i < std::ssize(repetitions); i++) {
-				if (repetitions[i].location < oldestEntry) {
-					oldest = i;
-					oldestEntry = repetitions[i].location;
-				}
-				if (std::max(repetitions[i].location, position - maximumCopyDistance) < earliestPosition) {
-					continue;
-				}
-				uint64_t mismatch = repetitions[i].sequence ^ sequence;
-				int matchLength = (!IsBigEndian) ? std::countr_zero(mismatch) : std::countl_zero(mismatch);
-				matchLength /= 8;
-				if (matchLength > bestMatch) {
-					bestMatch = matchLength;
-					bestMatchLocation = repetitions[i].location;
-				}
+		repetitions[oldest].location = position;
+		repetitions[oldest].sequence = sequence;
+	}
+	std::pair<int, ptrdiff_t> indexValueAndLocateBestMatch(Repository&, uint64_t sequence, ptrdiff_t earliestPosition, ptrdiff_t position) {
+		int oldest = 0;
+		ptrdiff_t oldestEntry = std::numeric_limits<ptrdiff_t>::max();
+		int bestMatch = 0;
+		ptrdiff_t bestMatchLocation = 0;
+		for (int i = 0; i < std::ssize(repetitions); i++) {
+			if (repetitions[i].location < oldestEntry) {
+				oldest = i;
+				oldestEntry = repetitions[i].location;
 			}
-			repetitions[oldest].location = position;
-			repetitions[oldest].sequence = sequence;
-			return {bestMatch, bestMatchLocation};
+			if (std::max(repetitions[i].location, position - maximumCopyDistance) < earliestPosition) {
+				continue;
+			}
+			uint64_t mismatch = repetitions[i].sequence ^ sequence;
+			int matchLength = (!IsBigEndian) ? std::countr_zero(mismatch) : std::countl_zero(mismatch);
+			matchLength /= 8;
+			if (matchLength > bestMatch) {
+				bestMatch = matchLength;
+				bestMatchLocation = repetitions[i].location;
+			}
 		}
+		repetitions[oldest].location = position;
+		repetitions[oldest].sequence = sequence;
+		return {bestMatch, bestMatchLocation};
+	}
+};
+
+struct QueueHistoryBuffer {
+	struct RepetitionEntry {
+		ptrdiff_t location = std::numeric_limits<ptrdiff_t>::min();
+		uint64_t sequence = 0;
 	};
+	struct Repository{};
+	std::deque<RepetitionEntry> repetitions = {};
+	void indexValue(Repository&, uint64_t sequence, ptrdiff_t position) {
+		repetitions.emplace_back(RepetitionEntry{position, sequence});
+	}
+	std::pair<int, ptrdiff_t> indexValueAndLocateBestMatch(Repository& repository, uint64_t sequence, ptrdiff_t earliestPosition, ptrdiff_t position) {
+		while (!repetitions.empty() && std::max(position - maximumCopyDistance, earliestPosition) > repetitions.front().location) {
+			repetitions.pop_front();
+		}
+		int bestMatch = 0;
+		ptrdiff_t bestMatchLocation = 0;
+		for (const RepetitionEntry& it : repetitions) {
+			uint64_t mismatch = it.sequence ^ sequence;
+			int matchLength = (!IsBigEndian) ? std::countr_zero(mismatch) : std::countl_zero(mismatch);
+			matchLength /= 8;
+			if (matchLength > bestMatch) {
+				bestMatch = matchLength;
+				bestMatchLocation = it.location;
+			}
+		}
+		indexValue(repository, sequence, position);
+		return {bestMatch, bestMatchLocation};
+	}
+};
+
+template <int MaxIterations = maximumCopyDistance, int QueueSize = maximumCopyDistance>
+struct CircularQueueHistoryBuffer {
+	struct RepetitionEntry {
+		ptrdiff_t location = std::numeric_limits<ptrdiff_t>::min();
+		uint64_t sequence = 0;
+		int nextIndex = QueueSize;
+	};
+	struct Repository {
+		int nextIndex = 0;
+		std::array<RepetitionEntry, QueueSize + 1> entries = {}; // Last element is never assigned and always discarded because of bad address
+	};
+	RepetitionEntry last = {};
+	void indexValue(Repository& repository, uint64_t sequence, ptrdiff_t position) {
+		repository.entries[repository.nextIndex] = last;
+		last.nextIndex = repository.nextIndex;
+		last.sequence = sequence;
+		last.location = position;
+		repository.nextIndex = (repository.nextIndex + 1) % QueueSize; // TODO: Check if this is done through a bitmask
+	}
+	std::pair<int, ptrdiff_t> indexValueAndLocateBestMatch(Repository& repository, uint64_t sequence, ptrdiff_t earliestPosition, ptrdiff_t position) {
+		if (std::max(position - maximumCopyDistance, earliestPosition) > last.location) {
+			last.nextIndex = QueueSize;
+			last.sequence = sequence;
+			last.location = position;
+			return {0, 0};
+		}
+		int bestMatch = 0;
+		ptrdiff_t bestMatchLocation = 0;
+		auto checkIfBest = [&] (const RepetitionEntry& entry) {
+			uint64_t mismatch = entry.sequence ^ sequence;
+			int matchLength = (!IsBigEndian) ? std::countr_zero(mismatch) : std::countl_zero(mismatch);
+			matchLength /= 8;
+			if (matchLength > bestMatch) {
+				bestMatch = matchLength;
+				bestMatchLocation = entry.location;
+			}
+		};
+		checkIfBest(last);
+		int iterations = 0;
+		ptrdiff_t lastPosition = std::numeric_limits<ptrdiff_t>::max();
+		for (int index = last.nextIndex; std::max(position - maximumCopyDistance, earliestPosition) <= repository.entries[index].location; index = repository.entries[index].nextIndex) {
+			checkIfBest(repository.entries[index]);
+			if constexpr(QueueSize != maximumCopyDistance) {
+				if (lastPosition <= repository.entries[index].location) {
+					break;
+				}
+				lastPosition = repository.entries[index].location;
+			}
+			if constexpr(MaxIterations < maximumCopyDistance) {
+				iterations++;
+				if (iterations >= MaxIterations) {
+					break;
+				}
+			}
+			if (bestMatch == 8) {
+				break;
+			}
+		}
+		indexValue(repository, sequence, position);
+		return {bestMatch, bestMatchLocation};
+	}
+};
+
+template <typename Entry, int Bits = 16>
+class PrefixBasedDuplicationIndex {
+	constexpr static int IndexSize = 1u << Bits;
 
 	std::array<Entry, IndexSize> index = {};
 	ByteInput& input;
 	ptrdiff_t start = input.getPositionStart();
+	Entry::Repository repository = {};
 
 	Entry& getEntry(uint64_t sequence) {
 		constexpr uint64_t Mask = (!IsBigEndian) ? ~(0xffffffffffffffff << Bits) : ~(0xffffffffffffffff >> Bits);
@@ -1088,18 +1208,19 @@ class DeduplicationBloomFilter {
 	}
 
 public:
-	DeduplicationBloomFilter(ByteInput& input) : input(input) {}
+	PrefixBasedDuplicationIndex(ByteInput& input) : input(input) {}
 
 	void moveBack(int shift) {
 		start += shift;
 	}
 
 	void indexValue(ptrdiff_t position, uint64_t sequence) {
-		getEntry(sequence).indexValue(sequence, position + start);
+		getEntry(sequence).indexValue(repository, sequence, position + start);
 	}
 
 	std::pair<ptrdiff_t, int> indexValueAndLocateBestMatch(ptrdiff_t position, uint64_t sequence) {
-		auto [bestMatch, bestMatchLocation] = getEntry(sequence).indexValueAndLocateBestMatch(sequence, input.getPositionStart(), position + start);
+		Entry& selected = getEntry(sequence);
+		auto [bestMatch, bestMatchLocation] = selected.indexValueAndLocateBestMatch(repository, sequence, input.getPositionStart(), position + start);
 		bestMatchLocation -= start;
 
 		if (bestMatch == 8) { // Everything in the sequence matches
@@ -1117,7 +1238,7 @@ public:
 	}
 };
 
-template <StreamSettings DeduplicatedSettings, DeduplicatingSearch DuplicationIndex, DeduplicationSettings deduplicationSettings>
+template <StreamSettings DeduplicatedSettings, DeduplicatingSearch DuplicationIndex, DeduplicationFlags deduplicationFlags>
 class Deduplicator {
 
 	int positionStart = 0;
@@ -1148,7 +1269,7 @@ public:
 			matchLength = std::min(matchLength, input.availableAhead());
 			int distance = position - location;
 			auto addDuplication = [&] {
-				if constexpr(deduplicationSettings & INDEX_DUPLICATES) {
+				if constexpr(deduplicationFlags & INDEX_DUPLICATES) {
 					for (ptrdiff_t indexingAt = position + 1; indexingAt < position + matchLength - 1; indexingAt++) {
 						search.indexValue(indexingAt, input.getEightBytesAtPosition(indexingAt));
 					}
@@ -1156,7 +1277,7 @@ public:
 				output.addDuplication(matchLength, distance);
 				input.advancePosition(matchLength - 1);
 			};
-			if constexpr(deduplicationSettings & INCLUDE_SMALL_DUPLICATES) {
+			if constexpr(deduplicationFlags & INCLUDE_SMALL_DUPLICATES) {
 				if (matchLength == 3 && distance < 64) {
 					addDuplication();
 					continue;
@@ -1933,13 +2054,13 @@ concept CompressionSettings = std::constructible_from<typename T::Checksum> && I
 	int(checksum());
 	int(checksum(std::span<const uint8_t>()));
 	int(T::HuffmanSectionSize);
-	DeduplicationSettings(T::deduplicationSettings);
+	DeduplicationFlags(T::deduplicationFlags);
 };
 #else
 #define CompressionSettings typename
 #endif
 
-struct DefaultCompressionSettings {
+struct FastCompressionSettings {
 	struct Input {
 		constexpr static int maxSize = 30000;
 		constexpr static int minSize = 10000;
@@ -1955,13 +2076,27 @@ struct DefaultCompressionSettings {
 	};
 
 	constexpr static int HuffmanSectionSize = 1000000;
-	constexpr static DeduplicationSettings deduplicationSettings = DeduplicationSettings(INDEX_DUPLICATES | INCLUDE_SMALL_DUPLICATES);
+	constexpr static DeduplicationFlags deduplicationFlags = DeduplicationFlags(NO_DUPLICATION_FLAGS);
 	using Checksum = FastCrc32;
-	using DeduplicationIndex = Detail::DeduplicationBloomFilter<>;
+	using DeduplicationIndex = Detail::PrefixBasedDuplicationIndex<Detail::LastRepetitionEntry>;
 };
 
-struct BestCompressionSettings : DefaultCompressionSettings {
+struct DefaultCompressionSettings : FastCompressionSettings {
+
+	constexpr static int HuffmanSectionSize = 20000;
+	constexpr static DeduplicationFlags deduplicationFlags = DeduplicationFlags(INDEX_DUPLICATES | INCLUDE_SMALL_DUPLICATES);
+	using Checksum = FastCrc32;
+	using DeduplicationIndex = Detail::PrefixBasedDuplicationIndex<Detail::RepetitionCircularBuffer<>>;
+};
+
+struct DenseCompressionSettings : DefaultCompressionSettings {
+	constexpr static int HuffmanSectionSize = 5000;
+	using DeduplicationIndex = Detail::PrefixBasedDuplicationIndex<Detail::CircularQueueHistoryBuffer<15>>;
+};
+
+struct BestCompressionSettings : DenseCompressionSettings {
 	constexpr static int HuffmanSectionSize = 1000;
+	using DeduplicationIndex = Detail::PrefixBasedDuplicationIndex<Detail::CircularQueueHistoryBuffer<>>;
 };
 
 // Handles decompression of a deflate-compressed archive, no headers
@@ -2006,7 +2141,7 @@ std::vector<uint8_t> writeDeflateIntoVector(std::function<int(std::span<char> ba
 			return readMoreFunction(std::span<char>(reinterpret_cast<char*>(batch.data()), batch.size()));
 		});
 		Detail::DeduplicatedStream<typename Settings::DeduplicationProperties> deduplicated(connector);
-		Detail::Deduplicator<typename Settings::DeduplicationProperties, typename Settings::DeduplicationIndex, Settings::deduplicationSettings> deduplicator(input, deduplicated);
+		Detail::Deduplicator<typename Settings::DeduplicationProperties, typename Settings::DeduplicationIndex, Settings::deduplicationFlags> deduplicator(input, deduplicated);
 
 		do {
 			deduplicator.deduplicateSome();
@@ -2158,7 +2293,7 @@ private:
 		writer.writeBatch(section, lastCall);
 		return section.position;
 	}};
-	Detail::Deduplicator<typename Settings::DeduplicationProperties, typename Settings::DeduplicationIndex, Settings::deduplicationSettings> deduplicator = {input, deduplicated};
+	Detail::Deduplicator<typename Settings::DeduplicationProperties, typename Settings::DeduplicationIndex, Settings::deduplicationFlags> deduplicator = {input, deduplicated};
 
 	void consume() {
 		std::span<const char> batch = output.getBuffer();
