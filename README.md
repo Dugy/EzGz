@@ -93,7 +93,7 @@ It is configurable to some extent, but the details may be changed completely in 
 * `DenseCompressionSettings` - relatively good compression ratio, slower
 * `BestCompressionSettings` - best compression ratio, slow
 
-Compared to `zlib`, only `DenseCompressionSettings` have better compression ratio than its fastest settings but is slower. `BestCompressionSettings` have worse compression ratios than the denser settings of `zlib`.
+Compared to zlib, only `DenseCompressionSettings` have better compression ratio than its fastest settings but is slower. `BestCompressionSettings` have worse compression ratios than the denser settings of zlib.
 
 ## Performance
 Decompression is about 30% faster than with `zlib`. Decompression speeds over 250 MiB/s are reachable on modern CPUs. It was tested on the standard Silesia Corpus file, compressed for minimum size.

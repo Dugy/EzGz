@@ -1198,7 +1198,7 @@ class PrefixBasedDuplicationIndex {
 	std::array<Entry, IndexSize> index = {};
 	ByteInput& input;
 	ptrdiff_t start = input.getPositionStart();
-	Entry::Repository repository = {};
+	typename Entry::Repository repository = {};
 
 	Entry& getEntry(uint64_t sequence) {
 		constexpr uint64_t Mask = (!IsBigEndian) ? ~(0xffffffffffffffff << Bits) : ~(0xffffffffffffffff >> Bits);
