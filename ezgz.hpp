@@ -189,12 +189,6 @@ struct MinDecompressionSettings {
 	using StringType = std::string;
 };
 
-enum DeduplicationFlags : uint32_t {
-	NO_DUPLICATION_FLAGS = 0x0,
-	INDEX_DUPLICATES = 0x1,
-	INCLUDE_SMALL_DUPLICATES = 0x2,
-};
-
 namespace Detail {
 
 constexpr std::array<uint32_t, 256> generateBasicCrc32LookupTable() {
@@ -347,6 +341,7 @@ class ByteInput {
 	ptrdiff_t positionStart = 0;
 	int minSize = 0;
 	int lookAheadSize = 0;
+	std::function<void(int offset)> notifyInvalidation = [] (int) {};
 
 	void ensureSize(int bytes) {
 		while (position + bytes + lookAheadSize > filled) [[unlikely]] {
@@ -406,6 +401,9 @@ public:
 		return positionStart;
 	}
 	uint8_t getAtPosition(int index) const {
+		if (index < 0) {
+			throw std::runtime_error("We screwed up");
+		}
 		return buffer[index];
 	}
 	uint64_t getEightBytesFromCurrentPosition() {
@@ -433,6 +431,7 @@ public:
 	std::span<uint8_t> startFilling() {
 		if (position + lookAheadSize >= filled) {
 			int offset = std::max(0, position - minSize);
+			notifyInvalidation(offset);
 			positionStart += offset;
 			filled -= offset;
 			memmove(buffer.data(), buffer.data() + offset, filled);
@@ -449,6 +448,10 @@ public:
 		}
 		filled += added;
 		return added;
+	}
+
+	void setInvalidationNotification(std::function<void(int offset)> notification = [] (int) {}) {
+		notifyInvalidation = notification;
 	}
 
 	template <int MaxTableSize>
@@ -478,8 +481,6 @@ public:
 	}
 };
 
-constexpr static std::array<int, 29> lengthOffsets = {3, 4, 4, 5, 7, 8, 9, 10, 11, 13, 15,
-		7, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258};
 constexpr static std::array<int, 30> distanceOffsets = {1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33,
 		49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577};
 
@@ -548,7 +549,7 @@ public:
 	// Up to 16 bits, unwanted bits blanked
 	uint16_t getBits(int amount) {
 		refillIfNeeded();
-		if (bitsLeft < amount) [[unlikely]] {
+		if (bitsLeft < amount) {
 			throw std::runtime_error("Run out of data");
 		}
 		uint16_t result = uint16_t(data);
@@ -598,57 +599,61 @@ public:
 constexpr int maximumCopyLength = 258;
 constexpr int maximumCopyDistance = 32768;
 
+struct DeduplicatingStreamSection {
+	int position = 0; // public
+	constexpr static std::array<int, 29> lengthLengthArray = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0};
+	inline static const int* lengthLength = lengthLengthArray.data() - 257; // Accessing other words than copy words is undefined behaviour
+
+	constexpr static std::array<int, 30> distanceLengthArray = {13, 13, 12, 12, 11, 11, 10, 10, 9, 9, 8, 8, 7, 7, 6, 6, 5, 5, 4, 4, 3, 3, 2, 2, 1, 1, 0, 0, 0, 0};
+	inline static const int* distanceLength = distanceLengthArray.data() + distanceLengthArray.size(); // Accessing other indexes than between -30 and -1 is UB
+
+	DeduplicatingStreamSection(std::span<const int16_t> section) : section(section) {}
+
+	struct CodeRemainderWithLength {
+		int remainder = 0;
+		int length = 0;
+	};
+
+	template <typename OnDuplication> // Three arguments, copy length - 1, distance word (range between -1 and -30), distance length - 1
+	int16_t readWord(const OnDuplication& onDuplication) {
+		int16_t word = section[position];
+		if (word >= 257) {
+			CodeRemainderWithLength lengthRemainder{ (-section[position + 1] & upperRemovals[lengthLength[word]]), lengthLength[word] };
+			int distanceWord = section[position + 2];
+			CodeRemainderWithLength distanceRemainder{ (-section[position + 3] & upperRemovals[distanceLength[distanceWord]]), distanceLength[distanceWord] };
+			onDuplication(lengthRemainder, section[position + 2], distanceRemainder);
+			position += 4;
+		} else {
+			position++;
+		}
+		return word;
+	}
+
+	bool atEnd() const {
+		return position == std::ssize(section);
+	}
+	int endPosition() const {
+		return int(std::ssize(section));
+	}
+
+private:
+	std::span<const int16_t> section = {};
+};
+
+struct IDeduplicatedStream {
+	virtual void flush() = 0;
+	virtual void addByte(uint8_t value) = 0;
+	virtual void addDuplication(int length, int distance) = 0;
+	virtual ~IDeduplicatedStream() = default;
+};
+
 template <StreamSettings Settings>
-class DeduplicatedStream {
+class DeduplicatedStream : public IDeduplicatedStream {
 	std::array<int16_t, Settings::maxSize> deduplicated = {};
 	int position = 0;
 
-public:
-	struct Section {
-		int position = 0; // public
-		constexpr static std::array<int, 29> lengthLengthArray = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0};
-		inline static const int* lengthLength = lengthLengthArray.data() - 257; // Accessing other words than copy words is undefined behaviour
-
-		constexpr static std::array<int, 30> distanceLengthArray = {13, 13, 12, 12, 11, 11, 10, 10, 9, 9, 8, 8, 7, 7, 6, 6, 5, 5, 4, 4, 3, 3, 2, 2, 1, 1, 0, 0, 0, 0};
-		inline static const int* distanceLength = distanceLengthArray.data() + distanceLengthArray.size(); // Accessing other indexes than between -30 and -1 is UB
-
-		Section(std::span<const int16_t> section) : section(section) {}
-
-		struct CodeRemainderWithLength {
-			int remainder = 0;
-			int length = 0;
-		};
-
-		template <typename OnDuplication> // Three arguments, copy length - 1, distance word (range between -1 and -30), distance length - 1
-		int16_t readWord(const OnDuplication& onDuplication) {
-			int16_t word = section[position];
-			if (word >= 257) {
-				CodeRemainderWithLength lengthRemainder{ (-section[position + 1] & upperRemovals[lengthLength[word]]), lengthLength[word] };
-				int distanceWord = section[position + 2];
-				CodeRemainderWithLength distanceRemainder{ (-section[position + 3] & upperRemovals[distanceLength[distanceWord]]), distanceLength[distanceWord] };
-				onDuplication(lengthRemainder, section[position + 2], distanceRemainder);
-				position += 4;
-			} else {
-				position++;
-			}
-			return word;
-		}
-
-		bool atEnd() const {
-			return position == std::ssize(section);
-		}
-		int endPosition() const {
-			return int(std::ssize(section));
-		}
-
-		constexpr static int MaxSize = Settings::maxSize;
-
-	private:
-		std::span<const int16_t> section = {};
-	};
-
 private:
-	std::function<int(Section, bool lastCall)> submit = {};
+	std::function<int(DeduplicatingStreamSection, bool DeduplicatingStreamSection)> submit = {};
 
 	void add(int16_t value) {
 		deduplicated[position] = value;
@@ -657,7 +662,7 @@ private:
 
 	void ensureSize(int size) {
 		if (position + size > std::ssize(deduplicated)) [[unlikely]] {
-			Section section(std::span<const int16_t>(deduplicated.begin(), deduplicated.begin() + position));
+			DeduplicatingStreamSection section(std::span<const int16_t>(deduplicated.begin(), deduplicated.begin() + position));
 			int consumed = submit(section, false);
 			if (consumed < std::ssize(deduplicated) - position - size)
 				throw std::runtime_error("DeduplicatedStream must have a submit callback that consumes at least 4 bytes");
@@ -667,24 +672,24 @@ private:
 	}
 
 public:
-	DeduplicatedStream(std::function<int(Section, bool lastCall)> submit) : submit(std::move(submit)) {}
+	DeduplicatedStream(std::function<int(DeduplicatingStreamSection, bool lastCall)> submit) : submit(std::move(submit)) {}
 	~DeduplicatedStream() {
 		flush();
 	}
 
-	void flush() {
+	void flush() override {
 		if (position > 0) [[likely]] {
-			Section section(std::span<const int16_t>(deduplicated.begin(), deduplicated.begin() + position));
+			DeduplicatingStreamSection section(std::span<const int16_t>(deduplicated.begin(), deduplicated.begin() + position));
 			submit(section, true);
 		}
 	}
 
-	void addByte(uint8_t value) {
+	void addByte(uint8_t value) override {
 		ensureSize(1);
 		add(value);
 	}
 
-	void addDuplication(int length, int distance) {
+	void addDuplication(int length, int distance) override {
 		ensureSize(4);
 
 		if (length <= 10) {
@@ -716,7 +721,6 @@ public:
 			add(-int16_t(modifiedDistance));
 		}
 	}
-
 };
 
 // Handles output of decompressed data, filling bytes from past bytes and chunking. Consume needs to be called to empty it
@@ -1018,16 +1022,28 @@ auto ByteInput::encodedTable(int realSize, const std::array<uint8_t, 256>& codeC
 	return EncodedTable<MaxTableSize>(*this, realSize, codeCodingLookup, codeCodingLengths);
 }
 
+struct RepetitionChecker {
+	virtual bool checkIfStillValid(ptrdiff_t oldPosition, ptrdiff_t currentPosition) = 0;
+	virtual int getMatchLength(ptrdiff_t oldPosition, ptrdiff_t currentPosition, int alreadyVerified = 0) = 0;
+	virtual ~RepetitionChecker() = default;
+};
+
 #if EZGZ_HAS_CONCEPTS
 template <typename Index>
-concept DeduplicatingSearch = requires(Index index, Detail::ByteInput& input, ptrdiff_t position, int distance, int length, uint64_t sequence, int offset) {
-	Index(input);
+concept DeduplicatingSearch = requires(Index index, RepetitionChecker& repetitionChecker, ptrdiff_t position, int distance, int length, uint64_t sequence, int offset) {
+	Index(repetitionChecker);
 	std::tie(distance, length) = index.indexValueAndLocateBestMatch(position, sequence);
 	index.indexValue(position, sequence);
-	index.moveBack(offset);
+};
+
+template <typename T>
+concept Deduplicator = requires(T deduplicator, ByteInput& input, IDeduplicatedStream& output) {
+	T(input, output);
+	deduplicator.deduplicateSome();
 };
 #else
 #define DeduplicatingSearch typename
+#define Deduplicator typename
 #endif
 
 struct LastRepetitionEntry {
@@ -1038,13 +1054,13 @@ struct LastRepetitionEntry {
 		location = position;
 		sequence = newSequence;
 	}
-	std::pair<int, ptrdiff_t> indexValueAndLocateBestMatch(Repository& repository, uint64_t newSequence, ptrdiff_t earliestPosition, ptrdiff_t position) {
+	std::pair<int, ptrdiff_t> indexValueAndLocateBestMatch(RepetitionChecker& repetitionChecker, Repository& repository, uint64_t newSequence, ptrdiff_t position) {
 		uint64_t mismatch = sequence ^ newSequence;
 		int matchLength = (!IsBigEndian) ? std::countr_zero(mismatch) : std::countl_zero(mismatch);
 		ptrdiff_t oldLocation = location;
 		matchLength /= 8;
 		indexValue(repository, newSequence, position);
-		if (std::max(oldLocation, position - maximumCopyDistance) < earliestPosition) {
+		if (!repetitionChecker.checkIfStillValid(oldLocation, position)) {
 			return {0, oldLocation};
 		}
 		return {matchLength, oldLocation};
@@ -1071,7 +1087,7 @@ struct RepetitionCircularBuffer {
 		repetitions[oldest].location = position;
 		repetitions[oldest].sequence = sequence;
 	}
-	std::pair<int, ptrdiff_t> indexValueAndLocateBestMatch(Repository&, uint64_t sequence, ptrdiff_t earliestPosition, ptrdiff_t position) {
+	std::pair<int, ptrdiff_t> indexValueAndLocateBestMatch(RepetitionChecker& repetitionChecker, Repository&, uint64_t sequence, ptrdiff_t position) {
 		int oldest = 0;
 		ptrdiff_t oldestEntry = std::numeric_limits<ptrdiff_t>::max();
 		int bestMatch = 0;
@@ -1081,12 +1097,15 @@ struct RepetitionCircularBuffer {
 				oldest = i;
 				oldestEntry = repetitions[i].location;
 			}
-			if (std::max(repetitions[i].location, position - maximumCopyDistance) < earliestPosition) {
+			if (!repetitionChecker.checkIfStillValid(repetitions[i].location, position)) {
 				continue;
 			}
 			uint64_t mismatch = repetitions[i].sequence ^ sequence;
 			int matchLength = (!IsBigEndian) ? std::countr_zero(mismatch) : std::countl_zero(mismatch);
 			matchLength /= 8;
+			if (matchLength == 8) {
+				matchLength = repetitionChecker.getMatchLength(repetitions[i].location, position, 8);
+			}
 			if (matchLength > bestMatch) {
 				bestMatch = matchLength;
 				bestMatchLocation = repetitions[i].location;
@@ -1108,8 +1127,8 @@ struct QueueHistoryBuffer {
 	void indexValue(Repository&, uint64_t sequence, ptrdiff_t position) {
 		repetitions.emplace_back(RepetitionEntry{position, sequence});
 	}
-	std::pair<int, ptrdiff_t> indexValueAndLocateBestMatch(Repository& repository, uint64_t sequence, ptrdiff_t earliestPosition, ptrdiff_t position) {
-		while (!repetitions.empty() && std::max(position - maximumCopyDistance, earliestPosition) > repetitions.front().location) {
+	std::pair<int, ptrdiff_t> indexValueAndLocateBestMatch(RepetitionChecker& repetitionChecker, Repository& repository, uint64_t sequence, ptrdiff_t position) {
+		while (!repetitions.empty() && !repetitionChecker.checkIfStillValid(repetitions.front().location, position)) {
 			repetitions.pop_front();
 		}
 		int bestMatch = 0;
@@ -1118,6 +1137,9 @@ struct QueueHistoryBuffer {
 			uint64_t mismatch = it.sequence ^ sequence;
 			int matchLength = (!IsBigEndian) ? std::countr_zero(mismatch) : std::countl_zero(mismatch);
 			matchLength /= 8;
+			if (matchLength == 8) {
+				matchLength = repetitionChecker.getMatchLength(it.location, position, 8);
+			}
 			if (matchLength > bestMatch) {
 				bestMatch = matchLength;
 				bestMatchLocation = it.location;
@@ -1147,8 +1169,8 @@ struct CircularQueueHistoryBuffer {
 		last.location = position;
 		repository.nextIndex = (repository.nextIndex + 1) % QueueSize; // TODO: Check if this is done through a bitmask
 	}
-	std::pair<int, ptrdiff_t> indexValueAndLocateBestMatch(Repository& repository, uint64_t sequence, ptrdiff_t earliestPosition, ptrdiff_t position) {
-		if (std::max(position - maximumCopyDistance, earliestPosition) > last.location) {
+	std::pair<int, ptrdiff_t> indexValueAndLocateBestMatch(RepetitionChecker& repetitionChecker, Repository& repository, uint64_t sequence, ptrdiff_t position) {
+		if (!repetitionChecker.checkIfStillValid(last.location, position)) {
 			last.nextIndex = QueueSize;
 			last.sequence = sequence;
 			last.location = position;
@@ -1160,6 +1182,9 @@ struct CircularQueueHistoryBuffer {
 			uint64_t mismatch = entry.sequence ^ sequence;
 			int matchLength = (!IsBigEndian) ? std::countr_zero(mismatch) : std::countl_zero(mismatch);
 			matchLength /= 8;
+			if (matchLength == 8) {
+				matchLength = repetitionChecker.getMatchLength(entry.location, position, 8);
+			}
 			if (matchLength > bestMatch) {
 				bestMatch = matchLength;
 				bestMatchLocation = entry.location;
@@ -1168,7 +1193,7 @@ struct CircularQueueHistoryBuffer {
 		checkIfBest(last);
 		int iterations = 0;
 		ptrdiff_t lastPosition = std::numeric_limits<ptrdiff_t>::max();
-		for (int index = last.nextIndex; std::max(position - maximumCopyDistance, earliestPosition) <= repository.entries[index].location; index = repository.entries[index].nextIndex) {
+		for (int index = last.nextIndex; repetitionChecker.checkIfStillValid(repository.entries[index].location, position); index = repository.entries[index].nextIndex) {
 			checkIfBest(repository.entries[index]);
 			if constexpr(QueueSize != maximumCopyDistance) {
 				if (lastPosition <= repository.entries[index].location) {
@@ -1182,7 +1207,7 @@ struct CircularQueueHistoryBuffer {
 					break;
 				}
 			}
-			if (bestMatch == 8) {
+			if (bestMatch == maximumCopyLength) {
 				break;
 			}
 		}
@@ -1196,8 +1221,7 @@ class PrefixBasedDuplicationIndex {
 	constexpr static int IndexSize = 1u << Bits;
 
 	std::array<Entry, IndexSize> index = {};
-	ByteInput& input;
-	ptrdiff_t start = input.getPositionStart();
+	RepetitionChecker& repetitionChecker;
 	typename Entry::Repository repository = {};
 
 	Entry& getEntry(uint64_t sequence) {
@@ -1208,27 +1232,17 @@ class PrefixBasedDuplicationIndex {
 	}
 
 public:
-	PrefixBasedDuplicationIndex(ByteInput& input) : input(input) {}
-
-	void moveBack(int shift) {
-		start += shift;
-	}
+	PrefixBasedDuplicationIndex(RepetitionChecker& repetitionChecker) : repetitionChecker(repetitionChecker) {}
 
 	void indexValue(ptrdiff_t position, uint64_t sequence) {
-		getEntry(sequence).indexValue(repository, sequence, position + start);
+		getEntry(sequence).indexValue(repository, sequence, position);
 	}
 
 	std::pair<ptrdiff_t, int> indexValueAndLocateBestMatch(ptrdiff_t position, uint64_t sequence) {
 		Entry& selected = getEntry(sequence);
-		auto [bestMatch, bestMatchLocation] = selected.indexValueAndLocateBestMatch(repository, sequence, input.getPositionStart(), position + start);
-		bestMatchLocation -= start;
+		auto [bestMatch, bestMatchLocation] = selected.indexValueAndLocateBestMatch(repetitionChecker, repository, sequence, position);
 
-		if (bestMatch == 8) { // Everything in the sequence matches
-			for ( ; bestMatch < maximumCopyLength; bestMatch++) { // TODO: Don't go past end
-				if (input.getAtPosition(bestMatchLocation + bestMatch) != input.getAtPosition(position + bestMatch)) {
-					return {bestMatchLocation, bestMatch};
-				}
-			}
+		if (bestMatch > 4) { // Everything in the sequence matches
 			return {bestMatchLocation, bestMatch};
 		} else if (bestMatch >= 3) { // 3 bytes are enough to write a duplication
 			return {bestMatchLocation, bestMatch};
@@ -1238,57 +1252,208 @@ public:
 	}
 };
 
-template <StreamSettings DeduplicatedSettings, DeduplicatingSearch DuplicationIndex, DeduplicationFlags deduplicationFlags>
-class Deduplicator {
-
-	int positionStart = 0;
-
+class DeduplicatorBase : protected RepetitionChecker {
+protected:
+	ptrdiff_t positionStart = 0;
 	ByteInput& input;
-	DeduplicatedStream<DeduplicatedSettings>& output;
 
-	DuplicationIndex search = {input};
+	bool checkIfStillValid(ptrdiff_t oldPosition, ptrdiff_t currentPosition) override {
+		return (currentPosition <= oldPosition + maximumCopyDistance && positionStart <= oldPosition);
+	}
+	int getMatchLength(ptrdiff_t oldPosition, ptrdiff_t currentPosition, int alreadyVerified) override {
+		for ( ; alreadyVerified < maximumCopyLength; alreadyVerified++) { // TODO: Don't go past end
+			if (input.getAtPosition(oldPosition - positionStart + alreadyVerified) != input.getAtPosition(currentPosition - positionStart + alreadyVerified)) {
+				return alreadyVerified;
+			}
+		}
+		return alreadyVerified;
+	}
+	DeduplicatorBase(ByteInput& input) : input(input) { }
+};
+
+enum DeduplicationFlags : uint32_t {
+	NO_DUPLICATION_FLAGS = 0x0,
+	INDEX_DUPLICATES = 0x1,
+	INCLUDE_SMALL_DUPLICATES = 0x2,
+};
+
+template <DeduplicatingSearch DuplicationIndex, DeduplicationFlags deduplicationFlags>
+class EagerDeduplicator : private DeduplicatorBase {
+	IDeduplicatedStream& output;
+	DuplicationIndex search = {*this};
 
 public:
-	Deduplicator(ByteInput& input, DeduplicatedStream<DeduplicatedSettings>& output) : input(input), output(output) {}
+	EagerDeduplicator(ByteInput& input, IDeduplicatedStream& output) : DeduplicatorBase(input), output(output) {
+		input.setInvalidationNotification([this] (int offset) {
+			positionStart += offset;
+		});
+	}
 
 	void deduplicateSome() {
 		do {
 			uint64_t sequence = input.getEightBytesFromCurrentPosition();
-			// Shift positions int the map to the new offset
-			if (input.getPositionStart() != positionStart) [[unlikely]] {
-				int newStart = int(input.getPositionStart());
-				int shift = newStart - positionStart;
-				search.moveBack(shift);
-				positionStart = newStart;
-			}
-
 			int position = input.getPosition() - 1;
 			int location = 0;
 			int matchLength = 0;
-			std::tie(location, matchLength) = search.indexValueAndLocateBestMatch(position, sequence);
+			std::tie(location, matchLength) = search.indexValueAndLocateBestMatch(position + positionStart, sequence);
+			location -= positionStart;
 			matchLength = std::min(matchLength, input.availableAhead());
 			int distance = position - location;
-			auto addDuplication = [&] {
+
+			if constexpr(deduplicationFlags & INCLUDE_SMALL_DUPLICATES) {
+				if (matchLength == 3 && distance > 64) {
+					matchLength = 0; // Turns out this is not worth the 5 extra bits of distance encoding
+				}
+			}
+			if (matchLength >= 3) {
 				if constexpr(deduplicationFlags & INDEX_DUPLICATES) {
-					for (ptrdiff_t indexingAt = position + 1; indexingAt < position + matchLength - 1; indexingAt++) {
-						search.indexValue(indexingAt, input.getEightBytesAtPosition(indexingAt));
+					if (matchLength >= 3) {
+						for (ptrdiff_t indexingAt = position + 1; indexingAt < position + matchLength - 1; indexingAt++) {
+							search.indexValue(indexingAt + positionStart, input.getEightBytesAtPosition(indexingAt));
+						}
 					}
+				}
+				if (distance < 0) {
+					throw std::runtime_error("We screwed up");
 				}
 				output.addDuplication(matchLength, distance);
 				input.advancePosition(matchLength - 1);
-			};
-			if constexpr(deduplicationFlags & INCLUDE_SMALL_DUPLICATES) {
-				if (matchLength == 3 && distance < 64) {
-					addDuplication();
-					continue;
-				}
-			}
-			if (matchLength >= 4) {
-				addDuplication();
 			} else {
 				output.addByte(input.getAtPosition(position));
 			}
 		} while (input.hasMoreDataInBuffer());
+	}
+
+	void flush() {}
+};
+
+template <DeduplicatingSearch DuplicationIndex, int MaxSize, DeduplicationFlags deduplicationFlags>
+struct PickyDeduplicator : private DeduplicatorBase {
+	IDeduplicatedStream& output;
+
+	DuplicationIndex search = {*this};
+
+	struct RepetitionEntry {
+		int position = 0;
+		int16_t length = 0;
+		uint16_t distance = 0;
+	};
+	std::array<RepetitionEntry, MaxSize> repetitions = {};
+	int repetitionsUsed = 0;
+
+	int flushedUntil = 0;
+	int unflushedData = 0;
+
+public:
+	PickyDeduplicator(ByteInput& input, IDeduplicatedStream& output) : DeduplicatorBase(input), output(output) {
+		input.setInvalidationNotification([this] (int offset) {
+			flush();
+			positionStart += offset;
+			flushedUntil -= offset;
+		});
+	}
+	~PickyDeduplicator() {
+		flush();
+	}
+
+	void deduplicateSome() {
+		do {
+			uint64_t sequence = input.getEightBytesFromCurrentPosition();
+			int position = input.getPosition() - 1;
+			int location = 0;
+			int matchLength = 0;
+			std::tie(location, matchLength) = search.indexValueAndLocateBestMatch(position + positionStart, sequence);
+			location -= positionStart;
+			matchLength = std::min(matchLength, input.availableAhead());
+			int distance = position - location;
+
+			if constexpr(deduplicationFlags & INCLUDE_SMALL_DUPLICATES) {
+				if (matchLength == 3 && distance > 64) {
+					matchLength = 0; // Turns out this is not worth the 5 extra bits of distance encoding
+				}
+			}
+			if (matchLength >= 3) {
+				if (distance < 0) {
+					throw std::runtime_error("We screwed up");
+				}
+				repetitions[repetitionsUsed] = RepetitionEntry{position, int16_t(matchLength), uint16_t(distance)};
+				repetitionsUsed++;
+				if (repetitionsUsed >= std::ssize(repetitions)) {
+					flush();
+				}
+			}
+			unflushedData++;
+		} while (input.hasMoreDataInBuffer());
+	}
+
+	void flush() {
+		// Make sure duplications don't overlap with the next step
+		int endAt = flushedUntil + unflushedData;
+		for (int i = repetitionsUsed - 1; i >= 0; i--) {
+			int fromEnd = repetitions[i].position + repetitions[i].length - endAt;
+			if (fromEnd > 0) {
+				repetitions[i].length -= fromEnd;
+				if (repetitions[i].length < 3) {
+					repetitions[i].length = 0;
+				}
+			}
+			if (repetitions[i].position + maximumCopyLength <= endAt) {
+				break;
+			}
+		}
+
+		// Prune duplications
+		if (repetitionsUsed >= 2) {
+			int previousRepetitionUsed = 0;
+			for (int i = 1; i < repetitionsUsed; i++) {
+				RepetitionEntry& current = repetitions[i];
+				RepetitionEntry& previous = repetitions[previousRepetitionUsed];
+				if (previous.position + previous.length < current.position) {
+					previousRepetitionUsed = i;
+					continue; // No overlap;
+				}
+				int remainderOfTheLast = previous.position + previous.length - current.position;
+				if (remainderOfTheLast < current.length) {
+					if (previous.length - remainderOfTheLast > 3) {
+						previous.length -= remainderOfTheLast; // Shorten it
+						previousRepetitionUsed = i;
+					} else {
+						// One of them has to be removed, this strategy is not optimal
+						if (current.length > previous.length) {
+							previous = RepetitionEntry{};
+							previousRepetitionUsed = i;
+						} else {
+							current = RepetitionEntry{};
+						}
+					}
+				} else {
+					current = RepetitionEntry{}; // The repetition is a subset of another one
+				}
+			}
+		}
+
+		// Write into the stream
+		int lastRepetitionEnd = flushedUntil;
+		auto writeRangeWithoutDuplications = [&] (int until) {
+			for (int i = lastRepetitionEnd; i < until; i++) {
+				output.addByte(input.getAtPosition(i));
+			}
+		};
+		for (int i = 0; i < repetitionsUsed; i++) {
+			if (repetitions[i].length) {
+				writeRangeWithoutDuplications(repetitions[i].position);
+				output.addDuplication(repetitions[i].length, repetitions[i].distance);
+				if (repetitions[i].length < 3) {
+					throw std::runtime_error("We screwed up");
+				}
+				lastRepetitionEnd = repetitions[i].position + repetitions[i].length;
+				repetitions[i] = RepetitionEntry{};
+			}
+		}
+		repetitionsUsed = 0;
+		writeRangeWithoutDuplications(flushedUntil + unflushedData);
+		flushedUntil += unflushedData;
+		unflushedData = 0;
 	}
 };
 
@@ -1770,7 +1935,7 @@ public:
 		bitOutput.reset();
 	}
 
-	void writeBatch(typename DeduplicatedStream<DeduplicatedSettings>::Section& section, bool isLast) {
+	void writeBatch(DeduplicatingStreamSection& section, bool isLast) {
 		// Baseline, dynamic Hufffman coding won't be used if it's better; TODO: Why not constexpr?
 		static HuffmanTable<286> staticWordEncoding = HuffmanTable<286>(typename HuffmanTable<286>::UseDefaultLengthEncoding());
 		static HuffmanTable<30> staticDistanceEncoding = HuffmanTable<30>(typename HuffmanTable<30>::UseDefaultDistanceEncoding());
@@ -1791,7 +1956,7 @@ public:
 				return distanceCounts.counts.data() + 30;
 			}
 
-			Counts(typename DeduplicatedStream<DeduplicatedSettings>::Section& section, int startPos, int endPos) {
+			Counts(DeduplicatingStreamSection& section, int startPos, int endPos) {
 				section.position = startPos;
 				while (section.position < endPos) {
 					int word = section.readWord([&] (auto, int distanceWord, auto) {
@@ -1845,7 +2010,7 @@ public:
 		};
 
 		class Block {
-			typename DeduplicatedStream<DeduplicatedSettings>::Section* section = nullptr; // Pointer just to allow default assignment
+			DeduplicatingStreamSection* section = nullptr; // Pointer just to allow default assignment
 
 			bool enabled = true;
 			bool last = false;
@@ -1861,7 +2026,7 @@ public:
 			HuffmanTable<30> dynamicDistanceEncoding = {};
 
 		public:
-			Block(typename DeduplicatedStream<DeduplicatedSettings>::Section& section, Counts&& counts, int startPos, bool last)
+			Block(DeduplicatingStreamSection& section, Counts&& counts, int startPos, bool last)
 			: section(&section), last(last), counts(std::move(counts)), startPos(startPos), endPos(counts.properEndPos) {
 				if (startPos >= endPos) {
 					enabled = false;
@@ -1989,7 +2154,7 @@ public:
 			}
 		};
 
-		constexpr static int BlockCount = std::max(DeduplicatedStream<DeduplicatedSettings>::Section::MaxSize / BlockSize, 1);
+		constexpr static int BlockCount = std::max(DeduplicatedSettings::maxSize / BlockSize, 1);
 		int previousEnd = 0;
 		std::array<Block, BlockCount> blocks = ArrayFiller([&] (int index) -> Block {
 			int end = (index + 1) * BlockSize;
@@ -2050,11 +2215,10 @@ public:
 template <typename T>
 concept CompressionSettings = std::constructible_from<typename T::Checksum> && InputStreamSettings<typename T::Input>
 			&& StreamSettings<typename T::Output> && StreamSettings<typename T::DeduplicationProperties>
-			 && Detail::DeduplicatingSearch<typename T::DeduplicationIndex> && requires(typename T::Checksum checksum) {
+			 && Detail::Deduplicator<typename T::Deduplicator> && requires(typename T::Checksum checksum) {
 	int(checksum());
 	int(checksum(std::span<const uint8_t>()));
 	int(T::HuffmanSectionSize);
-	DeduplicationFlags(T::deduplicationFlags);
 };
 #else
 #define CompressionSettings typename
@@ -2076,27 +2240,28 @@ struct FastCompressionSettings {
 	};
 
 	constexpr static int HuffmanSectionSize = 1000000;
-	constexpr static DeduplicationFlags deduplicationFlags = DeduplicationFlags(NO_DUPLICATION_FLAGS);
-	using Checksum = FastCrc32;
 	using DeduplicationIndex = Detail::PrefixBasedDuplicationIndex<Detail::LastRepetitionEntry>;
+	using Deduplicator = typename Detail::EagerDeduplicator<DeduplicationIndex, Detail::DeduplicationFlags(Detail::NO_DUPLICATION_FLAGS)>;
+	using Checksum = FastCrc32;
 };
 
 struct DefaultCompressionSettings : FastCompressionSettings {
-
 	constexpr static int HuffmanSectionSize = 20000;
-	constexpr static DeduplicationFlags deduplicationFlags = DeduplicationFlags(INDEX_DUPLICATES | INCLUDE_SMALL_DUPLICATES);
-	using Checksum = FastCrc32;
 	using DeduplicationIndex = Detail::PrefixBasedDuplicationIndex<Detail::RepetitionCircularBuffer<>>;
+	using Deduplicator = typename Detail::EagerDeduplicator<DeduplicationIndex, Detail::DeduplicationFlags(Detail::INDEX_DUPLICATES | Detail::INCLUDE_SMALL_DUPLICATES)>;
+	using Checksum = FastCrc32;
 };
 
 struct DenseCompressionSettings : DefaultCompressionSettings {
 	constexpr static int HuffmanSectionSize = 5000;
 	using DeduplicationIndex = Detail::PrefixBasedDuplicationIndex<Detail::CircularQueueHistoryBuffer<15>>;
+	using Deduplicator = typename Detail::EagerDeduplicator<DeduplicationIndex, Detail::DeduplicationFlags(Detail::INDEX_DUPLICATES | Detail::INCLUDE_SMALL_DUPLICATES)>;
 };
 
 struct BestCompressionSettings : DenseCompressionSettings {
-	constexpr static int HuffmanSectionSize = 1000;
+	constexpr static int HuffmanSectionSize = 2000;
 	using DeduplicationIndex = Detail::PrefixBasedDuplicationIndex<Detail::CircularQueueHistoryBuffer<>>;
+	using Deduplicator = typename Detail::EagerDeduplicator<DeduplicationIndex, Detail::DeduplicationFlags(Detail::INDEX_DUPLICATES | Detail::INCLUDE_SMALL_DUPLICATES)>;
 };
 
 // Handles decompression of a deflate-compressed archive, no headers
@@ -2133,7 +2298,7 @@ std::vector<uint8_t> writeDeflateIntoVector(std::function<int(std::span<char> ba
 	{
 		Detail::ByteOutput<typename Settings::Output, NoChecksum> output;
 		Detail::HuffmanWriter<typename Settings::Output, typename Settings::DeduplicationProperties> writer(output);
-		auto connector = [&] (typename Detail::DeduplicatedStream<typename Settings::DeduplicationProperties>::Section section, bool lastCall) {
+		auto connector = [&] (Detail::DeduplicatingStreamSection section, bool lastCall) {
 			writer.writeBatch(section, lastCall);
 			return section.position;
 		};
@@ -2141,7 +2306,7 @@ std::vector<uint8_t> writeDeflateIntoVector(std::function<int(std::span<char> ba
 			return readMoreFunction(std::span<char>(reinterpret_cast<char*>(batch.data()), batch.size()));
 		});
 		Detail::DeduplicatedStream<typename Settings::DeduplicationProperties> deduplicated(connector);
-		Detail::Deduplicator<typename Settings::DeduplicationProperties, typename Settings::DeduplicationIndex, Settings::deduplicationFlags> deduplicator(input, deduplicated);
+		typename Settings::Deduplicator deduplicator(input, deduplicated);
 
 		do {
 			deduplicator.deduplicateSome();
@@ -2150,6 +2315,7 @@ std::vector<uint8_t> writeDeflateIntoVector(std::function<int(std::span<char> ba
 			output.cleanBuffer();
 		} while (!input.isAtEnd());
 
+		deduplicator.flush();
 		deduplicated.flush();
 		writer.finalFlush();
 		output.done();
@@ -2289,11 +2455,11 @@ private:
 	Detail::HuffmanWriter<typename Settings::Output, typename Settings::DeduplicationProperties, Settings::HuffmanSectionSize> writer = {output};
 	std::function<void(std::span<const char> batch)> consumeFunction;
 	Detail::DeduplicatedStream<typename Settings::DeduplicationProperties> deduplicated = {[this]
-				(typename Detail::DeduplicatedStream<typename Settings::DeduplicationProperties>::Section section, bool lastCall) {
+				(Detail::DeduplicatingStreamSection section, bool lastCall) {
 		writer.writeBatch(section, lastCall);
 		return section.position;
 	}};
-	Detail::Deduplicator<typename Settings::DeduplicationProperties, typename Settings::DeduplicationIndex, Settings::deduplicationFlags> deduplicator = {input, deduplicated};
+	typename Settings::Deduplicator deduplicator = {input, deduplicated};
 
 	void consume() {
 		std::span<const char> batch = output.getBuffer();
@@ -2329,6 +2495,7 @@ public:
 		if (input.hasMoreDataInBuffer()) {
 			deduplicator.deduplicateSome();
 		}
+		deduplicator.flush();
 		deduplicated.flush();
 		writer.finalFlush();
 		writeTrailer();

@@ -51,12 +51,12 @@ struct DeduplicationVerifier {
 	int duplicationsFound = 0;
 	bool done = false;
 
-	int consume(typename EzGz::Detail::DeduplicatedStream<Settings>::Section section) {
+	int consume(typename EzGz::Detail::DeduplicatingStreamSection section) {
 		while (!section.atEnd()) {
 			int word = 0;
-			typename EzGz::Detail::DeduplicatedStream<Settings>::Section::CodeRemainderWithLength lengthRemainder;
+			typename EzGz::Detail::DeduplicatingStreamSection::CodeRemainderWithLength lengthRemainder;
 			int distanceWord = 0;
-			typename EzGz::Detail::DeduplicatedStream<Settings>::Section::CodeRemainderWithLength distanceRemainder;
+			typename EzGz::Detail::DeduplicatingStreamSection::CodeRemainderWithLength distanceRemainder;
 			word = section.readWord([&] (auto lengthRemainderCopy, int distanceWordCopy, auto distanceRemainderCopy) {
 				lengthRemainder = lengthRemainderCopy;
 				distanceWord = distanceWordCopy;
@@ -67,7 +67,10 @@ struct DeduplicationVerifier {
 //				std::cout << "Got " << char(word) << std::endl;
 			} else if (word > 256) {
 				duplicationsFound++;
-				int length = (word <= 264) ? (word - 254) : lengthRemainder.remainder + EzGz::Detail::lengthOffsets[word - 257];
+
+				constexpr static std::array<int, 29> lengthOffsets = {3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15,
+						17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258};
+				int length = (word <= 264) ? (word - 254) : lengthRemainder.remainder + lengthOffsets[word - 257];
 				int distance = (distanceWord >= -4) ? (-distanceWord) : EzGz::Detail::distanceOffsets[-1 - distanceWord] + distanceRemainder.remainder;
 				std::string appended;
 				for (int i = 0; i < length; i++) {
@@ -83,7 +86,7 @@ struct DeduplicationVerifier {
 		return section.position;
 	}
 	auto reader() {
-		return [this] (typename EzGz::Detail::DeduplicatedStream<Settings>::Section section, bool) {
+		return [this] (typename EzGz::Detail::DeduplicatingStreamSection section, bool) {
 			return consume(section);
 		};
 	}
@@ -112,6 +115,10 @@ int main(int, char**) {
 				std::cout << "Test failed: " << is << " instead of " << shouldBe << std::endl;
 			}
 		}
+	};
+
+	auto repeatOnEachType = [] (auto called, auto... args) {
+		(called(args), ...);
 	};
 
 	using namespace EzGz;
@@ -294,7 +301,7 @@ int main(int, char**) {
 	{
 		std::cout << "Testing DeduplicatedStream" << std::endl;
 		int duplicationsFound = 0;
-		auto checker = [&, step = 0] (Detail::DeduplicatedStream<TestStreamSettings<6, 2>>::Section section, bool isLast) mutable {
+		auto checker = [&, step = 0] (Detail::DeduplicatingStreamSection section, bool isLast) mutable {
 			auto shouldntFindDup = [&] (auto, int, auto) {doATest("IsDuplication", "Shouldn't be duplication"); };
 			do {
 				if (step == 0) doATest(section.readWord(shouldntFindDup), 'a');
@@ -330,7 +337,7 @@ int main(int, char**) {
 	{
 		std::cout << "Testing DeduplicatedStream 2" << std::endl;
 		int duplicationsFound = 0;
-		auto checker = [&, step = 0] (Detail::DeduplicatedStream<TestStreamSettings<10, 4>>::Section section, bool) mutable {
+		auto checker = [&, step = 0] (Detail::DeduplicatingStreamSection section, bool) mutable {
 			while (!section.atEnd()) {
 				if (step == 0) doATest(section.readWord([&] (auto lengthRemainder, int distanceWord, auto distanceRemainder) {
 					doATest(lengthRemainder.length, 0);
@@ -571,53 +578,69 @@ int main(int, char**) {
 	{
 		std::cout << "Testing Deduplicator" << std::endl;
 		std::string input = "hello hello hello hello\n";
-		InputHelper<50, 20, 10> byteReader(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(input.c_str()), input.size()));
 		int duplicationsFound = 0;
-		auto checker = [&, step = 0] (Detail::DeduplicatedStream<TestStreamSettings<10, 4>>::Section section, bool) mutable {
-			auto shouldntFindDup = [&] (auto, int, auto) {doATest("IsDuplication", "Shouldn't be duplication"); };
-			while (!section.atEnd()) {
-				if (step == 0) doATest(section.readWord(shouldntFindDup), 'h');
-				else if (step == 1) doATest(section.readWord(shouldntFindDup), 'e');
-				else if (step == 2) doATest(section.readWord(shouldntFindDup), 'l');
-				else if (step == 3) doATest(section.readWord(shouldntFindDup), 'l');
-				else if (step == 4) doATest(section.readWord(shouldntFindDup), 'o');
-				else if (step == 5) doATest(section.readWord(shouldntFindDup), ' ');
-				else if (step == 6) doATest(section.readWord([&] (auto lengthRemainder, int distanceWord, auto distanceRemainder) {
-					doATest(lengthRemainder.remainder, 0);
-					doATest(lengthRemainder.length, 1);
-					doATest(distanceWord, -5);
-					doATest(distanceRemainder.remainder, 1);
-					doATest(distanceRemainder.length, 1);
-					duplicationsFound++;
-				}), 268);
-				else if (step == 7) doATest(section.readWord(shouldntFindDup), '\n');
-				else {
-					doATest("More than 7 calls", "7 calls");
-					break;
+		auto getChecker = [&] {
+			return [&, step = 0] (Detail::DeduplicatingStreamSection section, bool) mutable {
+				auto shouldntFindDup = [&] (auto, int, auto) {doATest("IsDuplication", "Shouldn't be duplication"); };
+				while (!section.atEnd()) {
+					if (step == 0) doATest(section.readWord(shouldntFindDup), 'h');
+					else if (step == 1) doATest(section.readWord(shouldntFindDup), 'e');
+					else if (step == 2) doATest(section.readWord(shouldntFindDup), 'l');
+					else if (step == 3) doATest(section.readWord(shouldntFindDup), 'l');
+					else if (step == 4) doATest(section.readWord(shouldntFindDup), 'o');
+					else if (step == 5) doATest(section.readWord(shouldntFindDup), ' ');
+					else if (step == 6) doATest(section.readWord([&] (auto lengthRemainder, int distanceWord, auto distanceRemainder) {
+						doATest(lengthRemainder.remainder, 0);
+						doATest(lengthRemainder.length, 1);
+						doATest(distanceWord, -5);
+						doATest(distanceRemainder.remainder, 1);
+						doATest(distanceRemainder.length, 1);
+						duplicationsFound++;
+					}), 268);
+					else if (step == 7) doATest(section.readWord(shouldntFindDup), '\n');
+					else {
+						doATest("More than 7 calls", "7 calls");
+						break;
+					}
+					step++;
 				}
-				step++;
-			}
-			return section.position;
+				return section.position;
+			};
 		};
 		{
-			Detail::DeduplicatedStream<TestStreamSettings<10, 4>> output(checker);
-			Detail::Deduplicator<TestStreamSettings<10, 4>, Detail::PrefixBasedDuplicationIndex<Detail::RepetitionCircularBuffer<>>, INCLUDE_SMALL_DUPLICATES> deduplicator(byteReader, output);
+			InputHelper<50, 20, 10> byteReader(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(input.c_str()), input.size()));
+			Detail::DeduplicatedStream<TestStreamSettings<10, 4>> output(getChecker());
+			Detail::EagerDeduplicator<Detail::PrefixBasedDuplicationIndex<Detail::RepetitionCircularBuffer<>>, INCLUDE_SMALL_DUPLICATES> deduplicator(byteReader, output);
+			deduplicator.deduplicateSome();
+		}
+		{
+			InputHelper<50, 30, 0> byteReader(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(input.c_str()), input.size()));
+			Detail::DeduplicatedStream<TestStreamSettings<10, 4>> output(getChecker());
+			Detail::PickyDeduplicator<Detail::PrefixBasedDuplicationIndex<Detail::RepetitionCircularBuffer<>>, 30, INCLUDE_SMALL_DUPLICATES> deduplicator(byteReader, output);
 			deduplicator.deduplicateSome();
 		}
 	}
 
+	Detail::EagerDeduplicator<Detail::PrefixBasedDuplicationIndex<Detail::RepetitionCircularBuffer<>>, INCLUDE_SMALL_DUPLICATES>* standardDeduplicator = nullptr;
+	Detail::EagerDeduplicator<Detail::PrefixBasedDuplicationIndex<Detail::CircularQueueHistoryBuffer<>>, INCLUDE_SMALL_DUPLICATES>* standardQueueDeduplicator = nullptr;
+	Detail::PickyDeduplicator<Detail::PrefixBasedDuplicationIndex<Detail::RepetitionCircularBuffer<>>, 100, INCLUDE_SMALL_DUPLICATES>* pickyDeduplicator = nullptr;
+
 	{
 		std::cout << "Testing Deduplicator 2" << std::endl;
 		std::string input = "abaabbbabaababbaababaaaabaaabbbbbaa";
-		InputHelper<40, 22, 0> byteReader(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(input.c_str()), input.size()));
-		DeduplicationVerifier<TestStreamSettings<12, 5>> verifier;
-		{
-			Detail::DeduplicatedStream<TestStreamSettings<12, 5>> output(verifier.reader());
-			Detail::Deduplicator<TestStreamSettings<12, 5>, Detail::PrefixBasedDuplicationIndex<Detail::RepetitionCircularBuffer<>>, INCLUDE_SMALL_DUPLICATES> deduplicator(byteReader, output);
-			deduplicator.deduplicateSome();
-		}
-		doATest(verifier.parsed, "abaabbbabaababbaababaaaabaaabbbbbaa");
-		doATest(verifier.duplicationsFound >= 6, true); // Unreliable because hash collisions are purposefully not addressed
+
+		repeatOnEachType([&] (auto type) {
+			InputHelper<40, 22, 0> byteReader(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(input.c_str()), input.size()));
+			DeduplicationVerifier<TestStreamSettings<12, 5>> verifier;
+			{
+				Detail::DeduplicatedStream<TestStreamSettings<12, 5>> output(verifier.reader());
+				std::decay_t<std::remove_pointer_t<decltype(type)>> deduplicator(byteReader, output);
+				//Detail::BasicDeduplicator<Detail::PrefixBasedDuplicationIndex<Detail::RepetitionCircularBuffer<>>, INCLUDE_SMALL_DUPLICATES> deduplicator(byteReader, output);
+				deduplicator.deduplicateSome();
+			}
+			doATest(verifier.parsed, "abaabbbabaababbaababaaaabaaabbbbbaa");
+			doATest(verifier.duplicationsFound >= 5, true); // Unreliable because some search algorithms are not meant to be perfect
+		}, standardDeduplicator, standardQueueDeduplicator, pickyDeduplicator);
 	}
 
 	{
@@ -627,7 +650,7 @@ int main(int, char**) {
 		DeduplicationVerifier<TestStreamSettings<10, 4>> verifier;
 		{
 			Detail::DeduplicatedStream<TestStreamSettings<10, 4>> output(verifier.reader());
-			Detail::Deduplicator<TestStreamSettings<10, 4>, Detail::PrefixBasedDuplicationIndex<Detail::RepetitionCircularBuffer<>>, INCLUDE_SMALL_DUPLICATES> deduplicator(byteReader, output);
+			Detail::EagerDeduplicator<Detail::PrefixBasedDuplicationIndex<Detail::RepetitionCircularBuffer<>>, INCLUDE_SMALL_DUPLICATES> deduplicator(byteReader, output);
 			deduplicator.deduplicateSome();
 		}
 		doATest(verifier.parsed, "The main interesting thing about it is the deflate algorithm.");
@@ -665,7 +688,7 @@ int main(int, char**) {
 		Detail::ByteOutput<TestStreamSettings<20, 8>, NoChecksum> output;
 		{
 			Detail::HuffmanWriter<TestStreamSettings<20, 8>, TestStreamSettings<20, 8>> writer(output);
-			auto reader = [&] (typename Detail::DeduplicatedStream<TestStreamSettings<20, 8>>::Section section, bool lastCall) {
+			auto reader = [&] (Detail::DeduplicatingStreamSection section, bool lastCall) {
 				writer.writeBatch(section, lastCall);
 				return section.position;
 			};
@@ -695,7 +718,7 @@ int main(int, char**) {
 		Detail::ByteOutput<TestStreamSettings<20, 8>, NoChecksum> output;
 		{
 			Detail::HuffmanWriter<TestStreamSettings<20, 8>, TestStreamSettings<30, 13>> writer(output);
-			auto reader = [&] (typename Detail::DeduplicatedStream<TestStreamSettings<30, 13>>::Section section, bool lastCall) {
+			auto reader = [&] (Detail::DeduplicatingStreamSection section, bool lastCall) {
 				writer.writeBatch(section, lastCall);
 				return section.position;
 			};
@@ -733,7 +756,7 @@ int main(int, char**) {
 		Detail::ByteOutput<TestStreamSettings<80, 35>, NoChecksum> output;
 		{
 			Detail::HuffmanWriter<TestStreamSettings<80, 35>, TestStreamSettings<80, 35>> writer(output);
-			auto reader = [&] (typename Detail::DeduplicatedStream<TestStreamSettings<80, 35>>::Section section, bool lastCall) {
+			auto reader = [&] (Detail::DeduplicatingStreamSection section, bool lastCall) {
 				writer.writeBatch(section, lastCall);
 				return section.position;
 			};

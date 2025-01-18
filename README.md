@@ -91,7 +91,7 @@ It is configurable to some extent, but the details may be changed completely in 
 * `FastCompressionSettings` - very fast
 * `DefaultCompressionSettings` - better compression ratio, quite fast
 * `DenseCompressionSettings` - relatively good compression ratio, slower
-* `BestCompressionSettings` - best compression ratio, slow
+* `BestCompressionSettings` - best compression ratio, slow (seems to suffer from a bug)
 
 Compared to zlib, only `DenseCompressionSettings` have better compression ratio than its fastest settings but is slower. `BestCompressionSettings` have worse compression ratios than the denser settings of zlib.
 
