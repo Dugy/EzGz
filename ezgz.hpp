@@ -2215,7 +2215,7 @@ public:
 template <typename T>
 concept CompressionSettings = std::constructible_from<typename T::Checksum> && InputStreamSettings<typename T::Input>
 			&& StreamSettings<typename T::Output> && StreamSettings<typename T::DeduplicationProperties>
-			 && Detail::Deduplicator<typename T::Deduplicator> && requires(typename T::Checksum checksum) {
+			 && Detail::Deduplicator<typename T::DeduplicatorType> && requires(typename T::Checksum checksum) {
 	int(checksum());
 	int(checksum(std::span<const uint8_t>()));
 	int(T::HuffmanSectionSize);
@@ -2241,27 +2241,27 @@ struct FastCompressionSettings {
 
 	constexpr static int HuffmanSectionSize = 1000000;
 	using DeduplicationIndex = Detail::PrefixBasedDuplicationIndex<Detail::LastRepetitionEntry>;
-	using Deduplicator = typename Detail::EagerDeduplicator<DeduplicationIndex, Detail::DeduplicationFlags(Detail::NO_DUPLICATION_FLAGS)>;
+	using DeduplicatorType = typename Detail::EagerDeduplicator<DeduplicationIndex, Detail::DeduplicationFlags(Detail::NO_DUPLICATION_FLAGS)>;
 	using Checksum = FastCrc32;
 };
 
 struct DefaultCompressionSettings : FastCompressionSettings {
 	constexpr static int HuffmanSectionSize = 20000;
 	using DeduplicationIndex = Detail::PrefixBasedDuplicationIndex<Detail::RepetitionCircularBuffer<>>;
-	using Deduplicator = typename Detail::EagerDeduplicator<DeduplicationIndex, Detail::DeduplicationFlags(Detail::INDEX_DUPLICATES | Detail::INCLUDE_SMALL_DUPLICATES)>;
+	using DeduplicatorType = typename Detail::EagerDeduplicator<DeduplicationIndex, Detail::DeduplicationFlags(Detail::INDEX_DUPLICATES | Detail::INCLUDE_SMALL_DUPLICATES)>;
 	using Checksum = FastCrc32;
 };
 
 struct DenseCompressionSettings : DefaultCompressionSettings {
 	constexpr static int HuffmanSectionSize = 5000;
 	using DeduplicationIndex = Detail::PrefixBasedDuplicationIndex<Detail::CircularQueueHistoryBuffer<15>>;
-	using Deduplicator = typename Detail::EagerDeduplicator<DeduplicationIndex, Detail::DeduplicationFlags(Detail::INDEX_DUPLICATES | Detail::INCLUDE_SMALL_DUPLICATES)>;
+	using DeduplicatorType = typename Detail::EagerDeduplicator<DeduplicationIndex, Detail::DeduplicationFlags(Detail::INDEX_DUPLICATES | Detail::INCLUDE_SMALL_DUPLICATES)>;
 };
 
 struct BestCompressionSettings : DenseCompressionSettings {
 	constexpr static int HuffmanSectionSize = 2000;
 	using DeduplicationIndex = Detail::PrefixBasedDuplicationIndex<Detail::CircularQueueHistoryBuffer<>>;
-	using Deduplicator = typename Detail::EagerDeduplicator<DeduplicationIndex, Detail::DeduplicationFlags(Detail::INDEX_DUPLICATES | Detail::INCLUDE_SMALL_DUPLICATES)>;
+	using DeduplicatorType = typename Detail::EagerDeduplicator<DeduplicationIndex, Detail::DeduplicationFlags(Detail::INDEX_DUPLICATES | Detail::INCLUDE_SMALL_DUPLICATES)>;
 };
 
 // Handles decompression of a deflate-compressed archive, no headers
@@ -2306,7 +2306,7 @@ std::vector<uint8_t> writeDeflateIntoVector(std::function<int(std::span<char> ba
 			return readMoreFunction(std::span<char>(reinterpret_cast<char*>(batch.data()), batch.size()));
 		});
 		Detail::DeduplicatedStream<typename Settings::DeduplicationProperties> deduplicated(connector);
-		typename Settings::Deduplicator deduplicator(input, deduplicated);
+		typename Settings::DeduplicatorType deduplicator(input, deduplicated);
 
 		do {
 			deduplicator.deduplicateSome();
@@ -2459,7 +2459,7 @@ private:
 		writer.writeBatch(section, lastCall);
 		return section.position;
 	}};
-	typename Settings::Deduplicator deduplicator = {input, deduplicated};
+	typename Settings::DeduplicatorType deduplicator = {input, deduplicated};
 
 	void consume() {
 		std::span<const char> batch = output.getBuffer();
