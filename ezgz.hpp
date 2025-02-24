@@ -1068,7 +1068,7 @@ struct LastRepetitionEntry {
 };
 
 template <int HistorySize = 2>
-struct RepetitionCircularBuffer {
+struct StatelessRepetitionCircularBuffer {
 	struct RepetitionEntry {
 		ptrdiff_t location = std::numeric_limits<ptrdiff_t>::min();
 		uint64_t sequence = 0;
@@ -1113,6 +1113,47 @@ struct RepetitionCircularBuffer {
 		}
 		repetitions[oldest].location = position;
 		repetitions[oldest].sequence = sequence;
+		return {bestMatch, bestMatchLocation};
+	}
+};
+
+template <int HistorySize = 5>
+struct RepetitionCircularBuffer {
+	struct RepetitionEntry {
+		ptrdiff_t location = std::numeric_limits<ptrdiff_t>::min();
+		uint64_t sequence = 0;
+	};
+	struct Repository{};
+	std::array<RepetitionEntry, HistorySize> repetitions = {};
+	int lastEntry = 0;
+	void indexValue(Repository&, uint64_t sequence, ptrdiff_t position) {
+		lastEntry++;
+		lastEntry = (lastEntry == std::ssize(repetitions)) ? 0 : lastEntry;
+		repetitions[lastEntry].location = position;
+		repetitions[lastEntry].sequence = sequence;
+	}
+	std::pair<int, ptrdiff_t> indexValueAndLocateBestMatch(RepetitionChecker& repetitionChecker, Repository&, uint64_t sequence, ptrdiff_t position) {
+		int bestMatch = 0;
+		ptrdiff_t bestMatchLocation = 0;
+		for (int i = 0; i < std::ssize(repetitions); i++) {
+			if (!repetitionChecker.checkIfStillValid(repetitions[i].location, position)) {
+				continue;
+			}
+			uint64_t mismatch = repetitions[i].sequence ^ sequence;
+			int matchLength = (!IsBigEndian) ? std::countr_zero(mismatch) : std::countl_zero(mismatch);
+			matchLength /= 8;
+			if (matchLength == 8) {
+				matchLength = repetitionChecker.getMatchLength(repetitions[i].location, position, 8);
+			}
+			if (matchLength > bestMatch) {
+				bestMatch = matchLength;
+				bestMatchLocation = repetitions[i].location;
+			}
+		}
+		lastEntry++;
+		lastEntry = (lastEntry == std::ssize(repetitions)) ? 0 : lastEntry;
+		repetitions[lastEntry].location = position;
+		repetitions[lastEntry].sequence = sequence;
 		return {bestMatch, bestMatchLocation};
 	}
 };
@@ -2246,8 +2287,8 @@ struct FastCompressionSettings {
 };
 
 struct DefaultCompressionSettings : FastCompressionSettings {
-	constexpr static int HuffmanSectionSize = 20000;
-	using DeduplicationIndex = Detail::PrefixBasedDuplicationIndex<Detail::RepetitionCircularBuffer<>>;
+	constexpr static int HuffmanSectionSize = 50000;
+	using DeduplicationIndex = Detail::PrefixBasedDuplicationIndex<Detail::RepetitionCircularBuffer<5>>;
 	using DeduplicatorType = typename Detail::EagerDeduplicator<DeduplicationIndex, Detail::DeduplicationFlags(Detail::INDEX_DUPLICATES | Detail::INCLUDE_SMALL_DUPLICATES)>;
 	using Checksum = FastCrc32;
 };
@@ -2306,16 +2347,16 @@ std::vector<uint8_t> writeDeflateIntoVector(std::function<int(std::span<char> ba
 			return readMoreFunction(std::span<char>(reinterpret_cast<char*>(batch.data()), batch.size()));
 		});
 		Detail::DeduplicatedStream<typename Settings::DeduplicationProperties> deduplicated(connector);
-		typename Settings::DeduplicatorType deduplicator(input, deduplicated);
+		auto deduplicator = std::make_unique<typename Settings::DeduplicatorType>(input, deduplicated);
 
 		do {
-			deduplicator.deduplicateSome();
+			deduplicator->deduplicateSome();
 			std::span<const char> batch = output.getBuffer();
 			result.insert(result.end(), batch.begin(), batch.end());
 			output.cleanBuffer();
 		} while (!input.isAtEnd());
 
-		deduplicator.flush();
+		deduplicator->flush();
 		deduplicated.flush();
 		writer.finalFlush();
 		output.done();

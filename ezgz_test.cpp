@@ -634,9 +634,9 @@ int main(int, char**) {
 			DeduplicationVerifier<TestStreamSettings<12, 5>> verifier;
 			{
 				Detail::DeduplicatedStream<TestStreamSettings<12, 5>> output(verifier.reader());
-				std::decay_t<std::remove_pointer_t<decltype(type)>> deduplicator(byteReader, output);
+				auto deduplicator = std::make_unique<std::decay_t<std::remove_pointer_t<decltype(type)>>>(byteReader, output);
 				//Detail::BasicDeduplicator<Detail::PrefixBasedDuplicationIndex<Detail::RepetitionCircularBuffer<>>, INCLUDE_SMALL_DUPLICATES> deduplicator(byteReader, output);
-				deduplicator.deduplicateSome();
+				deduplicator->deduplicateSome();
 			}
 			doATest(verifier.parsed, "abaabbbabaababbaababaaaabaaabbbbbaa");
 			doATest(verifier.duplicationsFound >= 5, true); // Unreliable because some search algorithms are not meant to be perfect

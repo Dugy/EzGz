@@ -86,19 +86,29 @@ compressor << input.rdbuf();
 input.close();
 ```
 
+For smaller archives, using a function can be simpler (assuming there is a `std::vector` or `std::span` of `char` or `const char` named `data`):
+
+```C++
+std::vector<char> compressed = Ezgz::writeDeflateIntoVector<DefaultCompressionSettings>(data);
+```
+
 It is configurable to some extent, but the details may be changed completely in a future version. `EzGz::DefaultCompressionSettings` can be replaced by other presets I will try to keep in future versions:
 
 * `FastCompressionSettings` - very fast
-* `DefaultCompressionSettings` - better compression ratio, quite fast
+* `DefaultCompressionSettings` - better compression ratio, relatively fast
 * `DenseCompressionSettings` - relatively good compression ratio, slower
-* `BestCompressionSettings` - best compression ratio, slow (seems to suffer from a bug)
+* `BestCompressionSettings` - best compression ratio of EzGz, slow (seems to suffer from a bug)
 
-Compared to zlib, only `DenseCompressionSettings` have better compression ratio than its fastest settings but is slower. `BestCompressionSettings` have worse compression ratios than the denser settings of zlib.
+Compared to zlib, only `DenseCompressionSettings` have better compression ratio than its fastest settings but is slower. No compression settings have comparable ratios comparable to the denser settings of zlib.
+
+Note: under some settings, the buffers may be too large to fit on stack, in which case it's necessary to to dynamically allocate the compressor object. `writeDeflateIntoVector` does this automatically because `std::vector` does plenty of dynamic allocation already.
 
 ## Performance
 Decompression is about 30% faster than with `zlib`. Decompression speeds over 250 MiB/s are reachable on modern CPUs. It was tested on the standard Silesia Corpus file, compressed for minimum size.
 
 Using it through `std::ostream` has no noticeable impact on performance but any type of parsing will impact it significantly.
+
+`FastCompressionSettings` has a bad compression ratio but is significantly faster than zlib. Better compression ratios are generally slower than zlib.
 
 ## Code remarks
 The type used to represent bytes of compressed data is `uint8_t`. The type to represent bytes of uncompressed data is `char`. Some casting is necessary, but it usually makes it clear which data are compressed which aren't.
