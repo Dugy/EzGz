@@ -8,7 +8,7 @@ Just add `ezgz.hpp` into your project, it contains all the functionality and dep
 ### Decompression
 The easiest way of using this is to use the `IGzStream`. It inherits from `std::istream`, so it's usable as any other C++ input stream:
 ```C++
-Ezgz::IGzStream input("data.gz");
+EzGz::IGzStream input("data.gz");
 std::string line;
 while (std::getline(input, line)) { // You can read it by lines for example
 	std::cout << line << std::endl;
@@ -19,7 +19,7 @@ It can also be constructed from a `std::istream` to read data from, `std::span<c
 
 If you don't want to use a standard stream, you can use `IGzFile`, which gives a slightly lower level approach:
 ```C++
-Ezgz::IGzFile<> input(data); // Expecting the file's contents is already a contiguous container
+EzGz::IGzFile<> input(data); // Expecting the file's contents is already a contiguous container
 while (std::optional<std::span<const char>> chunk = input.readSome()) {
 	output.put(*chunk);
 }
@@ -27,7 +27,7 @@ while (std::optional<std::span<const char>> chunk = input.readSome()) {
 
 It supports some other ways of reading the data (the separator is newline by default, other separators can be set as second argument):
 ```C++
-Ezgz::IGzFile<> input([&file] (std::span<uint8_t> batch) -> int {
+EzGz::IGzFile<> input([&file] (std::span<uint8_t> batch) -> int {
 	// Fast reading from stream
 	file.read(reinterpret_cast<char*>(batch.data()), batch.size());
 	return input.gcount();
@@ -39,12 +39,12 @@ data.readByLines([&] (std::span<const char> chunk) {
 
 Or simply:
 ```C++
-std::vector<char> decompressed = Ezgz::IGzFile<>("data.gz").readAll();
+std::vector<char> decompressed = EzGz::IGzFile<>("data.gz").readAll();
 ```
 
 If the data is only deflate-compressed and not in an archive, you should use `IDeflateFile` instead of `IGzFile`. But in that case, it will most likely be already in some buffer, in which case, it's more convenient to do this:
 ```C++
-std::vector<char> decompressed = Ezgz::readDeflateIntoVector(data);
+std::vector<char> decompressed = EzGz::readDeflateIntoVector(data);
 ```
 The function has an overload that accepts a functor that fill buffers with input data and returns the amount of data filled.
 
@@ -62,12 +62,12 @@ Most classes and free functions accept a template argument whose values allow tu
 
 You can either declare your own struct or inherit from a default one and adjust only what you want:
 ```C++
-struct Settings : Ezgz::DefaultDecompressionSettings {
+struct Settings : EzGz::DefaultDecompressionSettings {
 	constexpr static int inputBufferSize = 30000;
 	using Checksum = EzGz::NoChecksum;
 	constexpr static bool verifyChecksum = false;
 }; // This will skip checksum
-std::vector<char> decompressed = Ezgz::IGzFile<Settings>("data.gz").readAll();
+std::vector<char> decompressed = EzGz::IGzFile<Settings>("data.gz").readAll();
 ```
 
 If including `fstream` is undesirable, the `EZGZ_NO_FILE` macro can be defined to remove the constructors that accept file names. This does not restrict usability much.
@@ -89,7 +89,7 @@ input.close();
 For smaller archives, using a function can be simpler (assuming there is a `std::vector` or `std::span` of `char` or `const char` named `data`):
 
 ```C++
-std::vector<char> compressed = Ezgz::writeDeflateIntoVector<DefaultCompressionSettings>(data);
+std::vector<char> compressed = EzGz::writeDeflateIntoVector<DefaultCompressionSettings>(data);
 ```
 
 It is configurable to some extent, but the details may be changed completely in a future version. `EzGz::DefaultCompressionSettings` can be replaced by other presets I will try to keep in future versions:
