@@ -1917,7 +1917,7 @@ class HuffmanWriter {
 				}
 				sameLengthRangeBegin = sameLengthRangeEnd;
 			};
-			int previousLength = sortedCounts.front().length;
+			int previousLength = 0;
 			for (Entry& word : sortedCounts) {
 				if (word.count == 0) break; // In this case, we're done sooner
 				if (usedCodes != 1) {
